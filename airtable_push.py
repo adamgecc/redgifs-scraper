@@ -170,7 +170,7 @@ class AirtablePush:
         offset = None
 
         while True:
-            params = {"pageSize": 100, "fields": ["URL"]}
+            params = {"pageSize": 100}
             if offset:
                 params["offset"] = offset
 

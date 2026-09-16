@@ -18,7 +18,7 @@ import time
 import random
 import os
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Optional: AdsPower proxy integration
@@ -44,6 +44,7 @@ class RedGifsScraper:
 
     BASE_API = "https://api.redgifs.com/v2"
     WATCH_URL_TEMPLATE = "https://www.redgifs.com/watch/{gif_id}"
+    AUTH_ENDPOINT = "https://api.redgifs.com/v2/auth/temporary"
 
     def __init__(self, proxy=None, user_agent=None, delay_range=(1.0, 3.0)):
         """
@@ -55,6 +56,7 @@ class RedGifsScraper:
         self.session = requests.Session()
         self.proxy = proxy
         self.delay_range = delay_range
+        self._token = None  # RedGifs temp auth token
 
         # Browser-like headers — RedGifs API is picky about UA
         self.session.headers.update({
@@ -68,6 +70,28 @@ class RedGifsScraper:
 
         if proxy:
             self.session.proxies.update(proxy)
+
+    def _get_temp_token(self):
+        """
+        RedGifs v2 API now requires a temporary guest token.
+        Hit the auth/temporary endpoint to get one, then set it as Bearer.
+        """
+        try:
+            resp = self.session.get(self.AUTH_ENDPOINT, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("token")
+            if token:
+                self._token = token
+                self.session.headers["Authorization"] = f"Bearer {token}"
+                print(f"  [+] Acquired RedGifs temp token")
+                return True
+            else:
+                print(f"  [!] Auth response had no token: {data}")
+                return False
+        except requests.exceptions.RequestException as e:
+            print(f"  [!] Failed to get temp token: {e}")
+            return False
 
     @staticmethod
     def _random_ua():
@@ -137,7 +161,7 @@ class RedGifsScraper:
                 "title": title,
                 "gif_id": gif_id,
                 "tags": gif.get("tags", []),
-                "scraped_at": datetime.utcnow().isoformat() + "Z",
+                "scraped_at": datetime.now(timezone.utc).isoformat(),
             })
 
         print(f"  [+] Got {len(results)} results for '{niche}' (page {page})")
@@ -155,6 +179,12 @@ class RedGifsScraper:
         Returns:
             list of result dicts
         """
+        # Acquire temp token if we don't have one yet
+        if not self._token:
+            if not self._get_temp_token():
+                print(f"  [!] Cannot scrape without auth token — aborting niche '{niche}'")
+                return []
+
         all_results = []
         page = 1
         per_page = min(target_count, 100)  # API max is 100 per page
