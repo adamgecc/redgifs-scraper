@@ -28,6 +28,13 @@ try:
 except ImportError:
     HAS_ADSPOWER = False
 
+# Optional: Airtable push integration
+try:
+    from airtable_push import AirtablePush
+    HAS_AIRTABLE = True
+except ImportError:
+    HAS_AIRTABLE = False
+
 
 class RedGifsScraper:
     """
@@ -242,6 +249,21 @@ def main():
     parser.add_argument("--adspower-profile", type=str, help="AdsPower profile ID to pull proxy from")
     parser.add_argument("--ua", type=str, help="Custom User-Agent string")
 
+    # Airtable push args
+    parser.add_argument("--airtable", action="store_true",
+                        help="Push results to Airtable after scraping")
+    parser.add_argument("--airtable-token", type=str,
+                        default=os.getenv("AIRTABLE_PAT"),
+                        help="Airtable PAT (or set AIRTABLE_PAT env var)")
+    parser.add_argument("--airtable-base", type=str,
+                        default=os.getenv("AIRTABLE_BASE_ID"),
+                        help="Airtable base ID (or set AIRTABLE_BASE_ID env var)")
+    parser.add_argument("--airtable-table", type=str,
+                        default=os.getenv("AIRTABLE_TABLE_NAME", "Table 1"),
+                        help='Airtable table name (default: "Table 1")')
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="Skip Airtable deduplication (push all records)")
+
     args = parser.parse_args()
 
     # Determine niches to scrape
@@ -295,6 +317,30 @@ def main():
     print(f"\n[*] Done! Scraped {total} items across {len(niches)} niche(s)")
     for niche, results in all_data.items():
         print(f"    {niche}: {len(results)} items")
+
+    # Push to Airtable if requested
+    if args.airtable:
+        if not HAS_AIRTABLE:
+            print("\n[!] Airtable module not found — skipping push")
+        elif not args.airtable_token or not args.airtable_base:
+            print("\n[!] Missing Airtable credentials — set --airtable-token and --airtable-base (or env vars)")
+        else:
+            print(f"\n[*] Pushing results to Airtable...")
+            pusher = AirtablePush(
+                token=args.airtable_token,
+                base_id=args.airtable_base,
+                table_name=args.airtable_table,
+            )
+
+            if not pusher.test_connection():
+                print("[!] Airtable connection failed — check credentials")
+            else:
+                # Flatten all results into one list
+                all_records = []
+                for niche, results in all_data.items():
+                    all_records.extend(results)
+
+                pusher.push_records(all_records, dedup=not args.no_dedup)
 
 
 if __name__ == "__main__":

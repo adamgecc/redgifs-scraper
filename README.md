@@ -16,6 +16,7 @@ A clean, modular Python scraper for collecting RedGifs niche content via the v2 
 - **AdsPower Integration** — Pull proxy config from AdsPower browser profiles automatically
 - **Rate-Limit Friendly** — Randomized delays + rotating User-Agents
 - **JSON Output** — Per-niche files + combined `all_results.json`
+- **Airtable Integration** — Auto-push scraped results to Airtable with deduplication
 - **CLI Driven** — Full argparse CLI with sensible defaults
 
 ## 📁 Project Structure
@@ -24,6 +25,7 @@ A clean, modular Python scraper for collecting RedGifs niche content via the v2 
 redgifs_scraper/
 ├── scraper.py            # Main scraper — RedGifs v2 API
 ├── adspower_proxy.py     # AdsPower proxy integration module
+├── airtable_push.py      # Airtable push module (REST API)
 ├── requirements.txt      # Python dependencies
 ├── LICENSE                # MIT License
 ├── README.md             # You are here
@@ -54,6 +56,15 @@ python scraper.py --niche blowjob --count 50 --proxy socks5://127.0.0.1:1080
 
 # Run — with AdsPower profile proxy
 python scraper.py --niche blowjob --count 50 --adspower-profile YOUR_PROFILE_ID
+
+# Run — scrape + push to Airtable
+python scraper.py --niche blowjob --count 50 --airtable --airtable-token patXXX --airtable-base appXXX --airtable-table "Table 1"
+
+# Run — with env vars for Airtable (recommended)
+export AIRTABLE_PAT="patXXX"
+export AIRTABLE_BASE_ID="appXXX"
+export AIRTABLE_TABLE_NAME="Table 1"
+python scraper.py --niche blowjob --count 50 --airtable
 ```
 
 ## ⚙️ CLI Arguments
@@ -70,6 +81,11 @@ python scraper.py --niche blowjob --count 50 --adspower-profile YOUR_PROFILE_ID
 | `--proxy` | — | Proxy URL (e.g. `socks5://127.0.0.1:1080`) |
 | `--adspower-profile` | — | AdsPower profile ID to pull proxy from |
 | `--ua` | random | Custom User-Agent string |
+| `--airtable` | off | Push results to Airtable after scraping |
+| `--airtable-token` | `AIRTABLE_PAT` | Airtable Personal Access Token |
+| `--airtable-base` | `AIRTABLE_BASE_ID` | Airtable base ID |
+| `--airtable-table` | `AIRTABLE_TABLE_NAME` | Airtable table name (default: "Table 1") |
+| `--no-dedup` | off | Skip Airtable deduplication |
 
 ## 📄 Output Format
 
@@ -121,11 +137,11 @@ python adspower_proxy.py YOUR_PROFILE_ID
 
 - [x] Core scraper (RedGifs v2 API)
 - [x] AdsPower proxy integration
+- [x] Airtable push with deduplication
 - [x] Multi-niche batch scraping
 - [x] JSON output with metadata
 - [ ] Cron scheduling wrapper
 - [ ] Reddit posting automation (PRAW)
-- [ ] Deduplication (skip already-posted URLs)
 - [ ] Multi-proxy rotation across AdsPower profiles
 - [ ] Auto-niche discovery from RedGifs categories page
 
