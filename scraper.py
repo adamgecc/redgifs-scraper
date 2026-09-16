@@ -170,6 +170,8 @@ class RedGifsScraper:
     def scrape_niche(self, niche, target_count=50, order="top"):
         """
         Scrape a niche until target_count is reached, paginating as needed.
+        Filters out duplicate URLs (RedGifs API sometimes returns the same GIF
+        across different pages).
 
         Args:
             niche: search term
@@ -186,8 +188,10 @@ class RedGifsScraper:
                 return []
 
         all_results = []
+        seen_ids = set()  # Track gif_ids to filter dupes
         page = 1
         per_page = min(target_count, 100)  # API max is 100 per page
+        consecutive_empty = 0  # Bail out if we get 3 empty pages in a row
 
         while len(all_results) < target_count:
             needed = target_count - len(all_results)
@@ -196,14 +200,37 @@ class RedGifsScraper:
             batch = self.search_niche(niche, count=fetch_count, order=order, page=page)
 
             if not batch:
+                consecutive_empty += 1
+                if consecutive_empty >= 3:
+                    print(f"  [-] 3 empty pages in a row — stopping early for '{niche}'")
+                    break
                 print(f"  [-] No more results for '{niche}' at page {page}")
                 break
+            consecutive_empty = 0  # Reset on success
 
-            all_results.extend(batch)
+            # Filter out duplicates by gif_id
+            new_items = []
+            dupe_count = 0
+            for item in batch:
+                gid = item.get("gif_id")
+                if gid and gid in seen_ids:
+                    dupe_count += 1
+                    continue
+                if gid:
+                    seen_ids.add(gid)
+                new_items.append(item)
+
+            if dupe_count:
+                print(f"  [=] Filtered {dupe_count} duplicate(s) from page {page}")
+
+            all_results.extend(new_items)
             page += 1
             self._rate_limit_sleep()
 
-        return all_results[:target_count]
+        if len(all_results) < target_count:
+            print(f"  [-] Could only find {len(all_results)} unique results for '{niche}' (target was {target_count})")
+
+        return all_results
 
     def scrape_multiple(self, niches, count_per_niche=50, order="top"):
         """
