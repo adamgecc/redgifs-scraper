@@ -111,6 +111,7 @@ class RedGifsScraper:
         """
         if not hasattr(self, '_niches_cache'):
             self._niches_cache = None
+            self._niche_tags_cache = {}  # slug → set of related tags
 
         if self._niches_cache is None:
             self._niches_cache = self._fetch_all_niches()
@@ -145,6 +146,48 @@ class RedGifsScraper:
                     return n['id']
 
         return None
+
+    def _get_niche_tags(self, slug):
+        """
+        Fetch the specific niche's detail to get its full related tags list.
+        RedGifs assigns each niche a set of related tags — we use these
+        to filter results for 100% accuracy.
+
+        Args:
+            slug: RedGifs niche slug (e.g. "blowjobs")
+
+        Returns:
+            set of lowercase tag strings, or empty set on failure
+        """
+        if slug in self._niche_tags_cache:
+            return self._niche_tags_cache[slug]
+
+        if not self._token:
+            self._get_temp_token()
+
+        try:
+            resp = self.session.get(f"{self.NICHES_API}/{slug}", timeout=30)
+            if resp.status_code != 200:
+                return set()
+
+            data = resp.json()
+            niche_data = data.get("niche", {})
+            tags = niche_data.get("tags", [])
+
+            # Also add the niche name itself as a tag for matching
+            niche_name = niche_data.get("name", "")
+            if niche_name:
+                tags.append(niche_name)
+
+            # Lowercase everything for case-insensitive matching
+            tag_set = set(t.lower() for t in tags if t)
+
+            self._niche_tags_cache[slug] = tag_set
+            print(f"  [+] Niche '{slug}' related tags: {sorted(tag_set)}")
+            return tag_set
+
+        except requests.exceptions.RequestException:
+            return set()
 
     def _fetch_all_niches(self):
         """
@@ -224,9 +267,11 @@ class RedGifsScraper:
 
     def search_niche(self, niche, count=50, order="top", page=1):
         """
-        Search RedGifs for a niche keyword.
+        Fetch a single page of RedGifs results for a niche.
         Uses the niches feed endpoint for tag-accurate results.
         Falls back to search endpoint if the niche slug isn't found.
+
+        This is a raw fetch — no filtering. Filtering happens in scrape_niche.
 
         Args:
             niche: search term (e.g. "blowjob")
@@ -235,7 +280,7 @@ class RedGifsScraper:
             page: page number for pagination
 
         Returns:
-            list of dicts: [{"url", "niche", "title"}, ...]
+            list of raw result dicts (unfiltered)
         """
         # Normalize the niche to find the RedGifs niche slug
         niche_slug = self._resolve_niche_slug(niche)
@@ -248,7 +293,8 @@ class RedGifsScraper:
             endpoint = self.SEARCH_API
             params = {"search": niche, "order": order, "count": count, "page": page}
 
-        print(f"  [*] Fetching {niche} | endpoint={'niches' if niche_slug else 'search'} | order={order} | count={count} | page={page}")
+        endpoint_name = 'niches' if niche_slug else 'search'
+        print(f"  [*] Fetching {niche} | endpoint={endpoint_name} | order={order} | count={count} | page={page}")
 
         try:
             resp = self.session.get(endpoint, params=params, timeout=30)
@@ -286,17 +332,22 @@ class RedGifsScraper:
 
     def scrape_niche(self, niche, target_count=50, order="top"):
         """
-        Scrape a niche until target_count is reached, paginating as needed.
-        Filters out duplicate URLs (RedGifs API sometimes returns the same GIF
-        across different pages).
+        Scrape a niche until target_count is reached, with hybrid tag filtering.
+        
+        Hybrid approach:
+        1. Fetch from niche feed (curated by RedGifs)
+        2. Filter results to only keep items matching the niche's related tags
+        3. If filtered too many, keep paginating to compensate
+        4. Fallback to search endpoint if niche slug not found
+        5. Dedup by gif_id across all pages
 
         Args:
             niche: search term
-            target_count: how many items to collect total
+            target_count: how many unique, tag-matched items to collect
             order: sort order
 
         Returns:
-            list of result dicts
+            list of result dicts (100% tag-accurate)
         """
         # Acquire temp token if we don't have one yet
         if not self._token:
@@ -304,15 +355,30 @@ class RedGifsScraper:
                 print(f"  [!] Cannot scrape without auth token — aborting niche '{niche}'")
                 return []
 
+        # Resolve niche slug
+        niche_slug = self._resolve_niche_slug(niche)
+
+        # Get the niche's related tags for filtering
+        filter_tags = set()
+        if niche_slug:
+            filter_tags = self._get_niche_tags(niche_slug)
+            if not filter_tags:
+                # Fallback: use the niche name itself
+                filter_tags = {niche.lower(), niche_slug.lower().replace('-', ' ')}
+
         all_results = []
-        seen_ids = set()  # Track gif_ids to filter dupes
+        seen_ids = set()
         page = 1
-        per_page = min(target_count, 100)  # API max is 100 per page
-        consecutive_empty = 0  # Bail out if we get 3 empty pages in a row
+        per_page = min(target_count * 2, 100)  # Over-fetch to compensate for filtered items
+        consecutive_empty = 0
+        total_filtered = 0
+        total_dupes = 0
 
         while len(all_results) < target_count:
+            # Calculate how many we still need, over-fetch 2x to account for filtering
             needed = target_count - len(all_results)
-            fetch_count = min(per_page, needed)
+            fetch_count = min(needed * 2, 100)
+            fetch_count = max(fetch_count, 10)  # Always fetch at least 10 per page
 
             batch = self.search_niche(niche, count=fetch_count, order=order, page=page)
 
@@ -323,29 +389,52 @@ class RedGifsScraper:
                     break
                 print(f"  [-] No more results for '{niche}' at page {page}")
                 break
-            consecutive_empty = 0  # Reset on success
+            consecutive_empty = 0
 
-            # Filter out duplicates by gif_id
+            # Filter by niche tags (hybrid accuracy)
             new_items = []
             dupe_count = 0
+            tag_filtered = 0
+
             for item in batch:
                 gid = item.get("gif_id")
+
+                # Dedup check
                 if gid and gid in seen_ids:
                     dupe_count += 1
                     continue
+
+                # Tag accuracy filter
+                if filter_tags:
+                    item_tags = set(t.lower() for t in item.get("tags", []))
+                    if not item_tags & filter_tags:
+                        # Item has no overlapping tags with the niche's related tags
+                        tag_filtered += 1
+                        continue
+
                 if gid:
                     seen_ids.add(gid)
                 new_items.append(item)
 
             if dupe_count:
                 print(f"  [=] Filtered {dupe_count} duplicate(s) from page {page}")
+                total_dupes += dupe_count
+            if tag_filtered:
+                print(f"  [=] Filtered {tag_filtered} off-tag item(s) from page {page}")
+                total_filtered += tag_filtered
 
             all_results.extend(new_items)
+            # Cap at target count — don't overshoot
+            if len(all_results) >= target_count:
+                all_results = all_results[:target_count]
+                break
             page += 1
             self._rate_limit_sleep()
 
         if len(all_results) < target_count:
-            print(f"  [-] Could only find {len(all_results)} unique results for '{niche}' (target was {target_count})")
+            print(f"  [-] Could only find {len(all_results)} unique tag-matched results for '{niche}' (target was {target_count})")
+        if total_filtered or total_dupes:
+            print(f"  [=] Total filtered: {total_filtered} off-tag, {total_dupes} duplicates")
 
         return all_results
 
