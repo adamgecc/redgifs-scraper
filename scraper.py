@@ -45,6 +45,8 @@ class RedGifsScraper:
     BASE_API = "https://api.redgifs.com/v2"
     WATCH_URL_TEMPLATE = "https://www.redgifs.com/watch/{gif_id}"
     AUTH_ENDPOINT = "https://api.redgifs.com/v2/auth/temporary"
+    NICHES_API = "https://api.redgifs.com/v2/niches"
+    SEARCH_API = "https://api.redgifs.com/v2/gifs/search"
 
     def __init__(self, proxy=None, user_agent=None, delay_range=(1.0, 3.0)):
         """
@@ -93,6 +95,116 @@ class RedGifsScraper:
             print(f"  [!] Failed to get temp token: {e}")
             return False
 
+    def _resolve_niche_slug(self, niche):
+        """
+        Resolve a user-provided niche name to a RedGifs niche slug.
+        RedGifs niches have slugs like 'blowjobs', 'just-boobs', etc.
+        This queries the niches list and matches by name (case-insensitive).
+
+        Caches the full niches list on first call for speed.
+
+        Args:
+            niche: user input (e.g. "blowjob", "blowjobs", "Blowjobs")
+
+        Returns:
+            niche slug string (e.g. "blowjobs") or None if no match
+        """
+        if not hasattr(self, '_niches_cache'):
+            self._niches_cache = None
+
+        if self._niches_cache is None:
+            self._niches_cache = self._fetch_all_niches()
+
+        niche_lower = niche.lower().strip()
+
+        # Exact slug match
+        for n in self._niches_cache:
+            if n['id'].lower() == niche_lower:
+                return n['id']
+
+        # Name match (case-insensitive)
+        for n in self._niches_cache:
+            if n['name'].lower() == niche_lower:
+                return n['id']
+
+        # Partial match — niche name contains the search term or vice versa
+        for n in self._niches_cache:
+            if niche_lower in n['name'].lower() or niche_lower in n['id'].lower():
+                return n['id']
+
+        # Try singular/plural variants
+        if niche_lower.endswith('s'):
+            singular = niche_lower[:-1]
+            for n in self._niches_cache:
+                if singular in n['name'].lower() or singular in n['id'].lower():
+                    return n['id']
+        else:
+            plural = niche_lower + 's'
+            for n in self._niches_cache:
+                if plural in n['name'].lower() or plural in n['id'].lower():
+                    return n['id']
+
+        return None
+
+    def _fetch_all_niches(self):
+        """
+        Fetch the full list of RedGifs niches (all pages).
+        Caches for the scraper session lifetime.
+
+        Returns:
+            list of dicts: [{"id", "name", "gifs", "subscribers", "tags"}, ...]
+        """
+        if not self._token:
+            self._get_temp_token()
+
+        all_niches = []
+        page = 1
+
+        while True:
+            params = {"count": 100, "page": page}
+            try:
+                resp = self.session.get(self.NICHES_API, params=params, timeout=30)
+                if resp.status_code != 200:
+                    break
+
+                data = resp.json()
+                niches = data.get("niches", [])
+                if not niches:
+                    break
+
+                all_niches.extend(niches)
+
+                total_pages = data.get("pages", 1)
+                if page >= total_pages:
+                    break
+
+                page += 1
+                time.sleep(0.3)  # Be nice during niche discovery
+
+            except requests.exceptions.RequestException:
+                break
+
+        print(f"  [+] Cached {len(all_niches)} RedGifs niches")
+        return all_niches
+
+    def list_niches(self):
+        """
+        Print all available RedGifs niches with their GIF counts.
+        Useful for discovering what's available.
+
+        Usage:
+            python scraper.py --list-niches
+        """
+        if not self._token:
+            self._get_temp_token()
+
+        niches = self._fetch_all_niches()
+        print(f"\n[*] {len(niches)} RedGifs Niches Available:\n")
+        print(f"{'Slug':<30} {'Name':<30} {'GIFs':>10} {'Subs':>10}")
+        print("-" * 85)
+        for n in sorted(niches, key=lambda x: x.get('gifs', 0), reverse=True):
+            print(f"{n['id']:<30} {n['name']:<30} {n.get('gifs', 0):>10,} {n.get('subscribers', 0):>10,}")
+
     @staticmethod
     def _random_ua():
         """Rotate through realistic browser UAs."""
@@ -113,6 +225,8 @@ class RedGifsScraper:
     def search_niche(self, niche, count=50, order="top", page=1):
         """
         Search RedGifs for a niche keyword.
+        Uses the niches feed endpoint for tag-accurate results.
+        Falls back to search endpoint if the niche slug isn't found.
 
         Args:
             niche: search term (e.g. "blowjob")
@@ -123,15 +237,18 @@ class RedGifsScraper:
         Returns:
             list of dicts: [{"url", "niche", "title"}, ...]
         """
-        endpoint = f"{self.BASE_API}/gifs/search"
-        params = {
-            "search": niche,
-            "order": order,
-            "count": count,
-            "page": page,
-        }
+        # Normalize the niche to find the RedGifs niche slug
+        niche_slug = self._resolve_niche_slug(niche)
 
-        print(f"  [*] Fetching {niche} | order={order} | count={count} | page={page}")
+        if niche_slug:
+            endpoint = f"{self.NICHES_API}/{niche_slug}/gifs"
+            params = {"order": order, "count": count, "page": page}
+        else:
+            # Fallback to search endpoint
+            endpoint = self.SEARCH_API
+            params = {"search": niche, "order": order, "count": count, "page": page}
+
+        print(f"  [*] Fetching {niche} | endpoint={'niches' if niche_slug else 'search'} | order={order} | count={count} | page={page}")
 
         try:
             resp = self.session.get(endpoint, params=params, timeout=30)
@@ -320,8 +437,18 @@ def main():
                         help='Airtable table name (default: "Table 1")')
     parser.add_argument("--no-dedup", action="store_true",
                         help="Skip Airtable deduplication (push all records)")
+    parser.add_argument("--list-niches", action="store_true",
+                        help="List all available RedGifs niches and exit")
 
     args = parser.parse_args()
+
+    # Handle --list-niches
+    if args.list_niches:
+        scraper = RedGifsScraper(
+            delay_range=(args.delay_min, args.delay_max),
+        )
+        scraper.list_niches()
+        return
 
     # Determine niches to scrape
     niches = []
