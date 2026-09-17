@@ -293,6 +293,7 @@ class RedditPoster:
     REDDIT_LOGIN = "https://www.reddit.com/account/login"
     REDDIT_SUBMIT = "https://www.reddit.com/submit"
     REDDIT_SUBMIT_SUB = "https://www.reddit.com/r/{subreddit}/submit"
+    REDDIT_SUBMIT_LINK = "https://www.reddit.com/r/{subreddit}/submit?type=LINK"
 
     def __init__(
         self,
@@ -599,8 +600,8 @@ class RedditPoster:
         Returns (success, reddit_post_url, error_screenshot_path).
         """
         try:
-            # Navigate to subreddit submit page
-            submit_url = self.REDDIT_SUBMIT_SUB.format(subreddit=subreddit)
+            # Navigate to subreddit submit page — use LINK type to force link post
+            submit_url = self.REDDIT_SUBMIT_LINK.format(subreddit=subreddit)
             print(f"    [*] Navigating to {submit_url}...")
             page.goto(submit_url, wait_until="domcontentloaded", timeout=60000)
             HumanBehavior.random_delay(3, 6)
@@ -634,12 +635,70 @@ class RedditPoster:
             print("    [*] Simulating browsing behavior...")
             HumanBehavior.browse_before_posting(page)
 
+            # Try to find and click "Link" post type option
+            # New Reddit UI has tabs/buttons at the top of the form: "Post" | "Images & Video" | "Link"
+            link_tab_selectors = [
+                'button:has-text("Link")',
+                'a:has-text("Link")',
+                '[role="tab"]:has-text("Link")',
+                '[data-testid="tab-link"]',
+                'div[role="button"]:has-text("Link")',
+                'span:has-text("Link")',
+                # Reddit might use icon-based tabs
+                '[aria-label="Link"]',
+                '[aria-label="link"]',
+            ]
+            for sel in link_tab_selectors:
+                try:
+                    if page.locator(sel).count() > 0:
+                        print(f"    [*] Clicking Link tab: {sel}")
+                        HumanBehavior.move_and_click(page, sel)
+                        HumanBehavior.random_delay(2, 4)
+                        break
+                except:
+                    continue
+
+            # Take a screenshot after clicking Link tab to see what changed
+            self.take_screenshot(page, "after_link_tab")
+
+            # Fill in URL — look for URL input field (appears when Link tab is selected)
+            print("    [*] Entering URL...")
+            url_selectors = [
+                'input[name="url"]',
+                'input[type="url"]',
+                'textarea[placeholder*="URL"]',
+                'input[placeholder*="URL"]',
+                'input[placeholder*="url"]',
+                'input[placeholder*="Url"]',
+                'input[placeholder*="link"]',
+                '#post-url',
+                '[data-testid="post-url"]',
+            ]
+            url_filled = False
+            for sel in url_selectors:
+                try:
+                    if page.locator(sel).count() > 0:
+                        HumanBehavior.type_human(page, sel, url)
+                        url_filled = True
+                        print(f"    [+] URL filled via selector: {sel}")
+                        break
+                except:
+                    continue
+
+            if not url_filled:
+                # Take screenshot to see what the page looks like
+                screenshot = self.take_screenshot(page, "url_field_not_found")
+                return False, None, screenshot
+
+            HumanBehavior.random_delay(1, 3)
+
             # Fill in title
             print("    [*] Entering title...")
             title_selectors = [
                 'textarea[placeholder*="Title"]',
                 'input[placeholder*="Title"]',
-                'div[role="textbox"][contenteditable="true"]',
+                'textarea[name="title"]',
+                'input[name="title"]',
                 '#post-title',
                 '[data-testid="post-title"]',
             ]
@@ -656,73 +715,6 @@ class RedditPoster:
 
             if not title_filled:
                 screenshot = self.take_screenshot(page, "title_field_not_found")
-                return False, None, screenshot
-
-            HumanBehavior.random_delay(1, 3)
-
-            # Fill URL into body — Reddit's new UI has a rich text body area
-            # We paste the RedGifs link there. Reddit will auto-embed it.
-            print("    [*] Entering URL into body...")
-            body_selectors = [
-                'div[contenteditable="true"][role="textbox"]',
-                'textarea[placeholder*="Body"]',
-                'textarea[placeholder*="body"]',
-                'div[role="textbox"]',
-                '.RichTextEditor-root [contenteditable="true"]',
-                '[data-testid="post-body"]',
-            ]
-            body_filled = False
-            for sel in body_selectors:
-                try:
-                    # Skip the title field (it's also contenteditable)
-                    if "Title" in sel or "title" in sel.lower():
-                        continue
-                    if page.locator(sel).count() > 0:
-                        # For contenteditable divs, we need to click then type
-                        HumanBehavior.move_and_click(page, sel)
-                        HumanBehavior.random_delay(0.3, 0.8)
-                        # Paste the URL
-                        page.keyboard.type(url, delay=random.randint(30, 80))
-                        body_filled = True
-                        print(f"    [+] URL entered into body via selector: {sel}")
-                        break
-                except:
-                    continue
-
-            if not body_filled:
-                # Fallback: try clicking the link icon in the toolbar
-                print("    [*] Body field not found — trying link icon in toolbar...")
-                link_icon_selectors = [
-                    'button[aria-label*="Link"]',
-                    'button[aria-label*="link"]',
-                    'button[title*="Link"]',
-                    'button:has-text("Link")',
-                ]
-                for sel in link_icon_selectors:
-                    try:
-                        if page.locator(sel).count() > 0:
-                            HumanBehavior.move_and_click(page, sel)
-                            HumanBehavior.random_delay(0.5, 1.5)
-                            # A URL input should appear
-                            url_input_selectors = [
-                                'input[placeholder*="URL"]',
-                                'input[placeholder*="url"]',
-                                'input[type="url"]',
-                                'input[placeholder*="link"]',
-                            ]
-                            for usel in url_input_selectors:
-                                if page.locator(usel).count() > 0:
-                                    HumanBehavior.type_human(page, usel, url)
-                                    body_filled = True
-                                    print(f"    [+] URL entered via link dialog: {usel}")
-                                    break
-                            if body_filled:
-                                break
-                    except:
-                        continue
-
-            if not body_filled:
-                screenshot = self.take_screenshot(page, "body_field_not_found")
                 return False, None, screenshot
 
             HumanBehavior.random_delay(1, 2)
