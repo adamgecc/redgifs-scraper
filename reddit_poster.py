@@ -293,7 +293,7 @@ class RedditPoster:
     REDDIT_LOGIN = "https://www.reddit.com/account/login"
     REDDIT_SUBMIT = "https://www.reddit.com/submit"
     REDDIT_SUBMIT_SUB = "https://www.reddit.com/r/{subreddit}/submit"
-    REDDIT_SUBMIT_LINK = "https://www.reddit.com/r/{subreddit}/submit?type=LINK"
+    REDDIT_SUBMIT_LINK = "https://www.reddit.com/r/{subreddit}/submit"
 
     def __init__(
         self,
@@ -604,7 +604,20 @@ class RedditPoster:
             submit_url = self.REDDIT_SUBMIT_LINK.format(subreddit=subreddit)
             print(f"    [*] Navigating to {submit_url}...")
             page.goto(submit_url, wait_until="domcontentloaded", timeout=60000)
-            HumanBehavior.random_delay(3, 6)
+            
+            # Wait for the page to fully render — the post type tabs (Text/Images/Link/Poll/AMA)
+            # load via JavaScript after the initial DOM load
+            print("    [*] Waiting for page to fully render...")
+            time.sleep(12)  # Reddit JS is slow to render the full submit form
+            
+            try:
+                page.wait_for_selector('input[name="url"], input[type="url"], input[placeholder*="URL"], input[placeholder*="url"], textarea[placeholder*="URL"]', timeout=15000)
+                print("    [+] URL field found on page!")
+            except:
+                print("    [*] URL field not found yet — waiting extra...")
+                time.sleep(5)
+            
+            HumanBehavior.random_delay(2, 4)
 
             # Handle mature content popup if it appears on the submit page
             mature_selectors_pre = [
@@ -635,33 +648,71 @@ class RedditPoster:
             print("    [*] Simulating browsing behavior...")
             HumanBehavior.browse_before_posting(page)
 
-            # Try to find and click "Link" post type option
-            # New Reddit UI has tabs/buttons at the top of the form: "Post" | "Images & Video" | "Link"
-            link_tab_selectors = [
-                'button:has-text("Link")',
-                'a:has-text("Link")',
-                '[role="tab"]:has-text("Link")',
-                '[data-testid="tab-link"]',
-                'div[role="button"]:has-text("Link")',
-                'span:has-text("Link")',
-                # Reddit might use icon-based tabs
-                '[aria-label="Link"]',
-                '[aria-label="link"]',
-            ]
-            for sel in link_tab_selectors:
-                try:
-                    if page.locator(sel).count() > 0:
-                        print(f"    [*] Clicking Link tab: {sel}")
-                        HumanBehavior.move_and_click(page, sel)
-                        HumanBehavior.random_delay(2, 4)
-                        break
-                except:
-                    continue
+            # Take a screenshot BEFORE trying to click Link tab — this shows the fully loaded page
+            self.take_screenshot(page, "submit_page_loaded")
 
-            # Take a screenshot after clicking Link tab to see what changed
+            # Try to find and click "Link" post type tab
+            # New Reddit UI has tabs at the top: Text | Images | Link | Poll | AMA
+            # We need to click the "Link" tab that's in the same row as "Text" and "Images"
+            print("    [*] Looking for Link post type tab...")
+            
+            try:
+                # Find all VISIBLE elements containing "Link" text
+                all_link_elements = page.locator('text="Link"')
+                count = all_link_elements.count()
+                print(f"    [*] Found {count} elements with text 'Link'")
+
+                clicked_link_tab = False
+                for idx in range(count):
+                    try:
+                        el = all_link_elements.nth(idx)
+                        # Check if element is visible
+                        if not el.is_visible():
+                            continue
+
+                        # Get the parent context to check if this is the post type tab
+                        parent_text = el.evaluate("""el => {
+                            let p = el;
+                            for (let i = 0; i < 5; i++) {
+                                p = p.parentElement;
+                                if (!p) break;
+                                const text = p.textContent || '';
+                                if (text.includes('Text') && text.includes('Images') && (text.includes('Poll') || text.includes('AMA'))) {
+                                    return text;
+                                }
+                            }
+                            return '';
+                        }""")
+
+                        if parent_text and ("Text" in parent_text and "Images" in parent_text):
+                            print(f"    [*] Found Link tab in post type row — clicking...")
+                            el.click()
+                            HumanBehavior.random_delay(2, 4)
+                            clicked_link_tab = True
+                            break
+                    except:
+                        continue
+
+                if not clicked_link_tab:
+                    # Fallback: click the first VISIBLE "Link" element
+                    print("    [*] Could not identify tab row — clicking first visible 'Link' element...")
+                    for idx in range(count):
+                        el = all_link_elements.nth(idx)
+                        if el.is_visible():
+                            el.click()
+                            HumanBehavior.random_delay(2, 4)
+                            clicked_link_tab = True
+                            break
+            except Exception as e:
+                print(f"    [!] Error finding Link tab: {e}")
+
+            # Take a screenshot after clicking Link tab
             self.take_screenshot(page, "after_link_tab")
 
-            # Fill in URL — look for URL input field (appears when Link tab is selected)
+            # Fill in URL — Reddit's submit page sometimes shows a URL field, sometimes doesn't
+            # Try multiple approaches:
+            # 1. Look for a URL input field
+            # 2. If not found, paste URL into the body text area (Reddit auto-detects URLs)
             print("    [*] Entering URL...")
             url_selectors = [
                 'input[name="url"]',
@@ -677,7 +728,7 @@ class RedditPoster:
             url_filled = False
             for sel in url_selectors:
                 try:
-                    if page.locator(sel).count() > 0:
+                    if page.locator(sel).count() > 0 and page.locator(sel).first.is_visible():
                         HumanBehavior.type_human(page, sel, url)
                         url_filled = True
                         print(f"    [+] URL filled via selector: {sel}")
@@ -686,8 +737,28 @@ class RedditPoster:
                     continue
 
             if not url_filled:
-                # Take screenshot to see what the page looks like
-                screenshot = self.take_screenshot(page, "url_field_not_found")
+                # No URL field found — paste into body text area instead
+                # Reddit auto-detects URLs and treats them as link posts
+                print("    [*] No URL field found — pasting URL into body text area...")
+                body_selectors = [
+                    'div[contenteditable="true"][role="textbox"]',
+                    'textarea[placeholder*="Body"]',
+                    'div[role="textbox"]',
+                ]
+                for sel in body_selectors:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            HumanBehavior.move_and_click(page, sel)
+                            HumanBehavior.random_delay(0.3, 0.8)
+                            page.keyboard.type(url, delay=random.randint(30, 80))
+                            url_filled = True
+                            print(f"    [+] URL entered into body via: {sel}")
+                            break
+                    except:
+                        continue
+
+            if not url_filled:
+                screenshot = self.take_screenshot(page, "url_and_body_not_found")
                 return False, None, screenshot
 
             HumanBehavior.random_delay(1, 3)
