@@ -66,13 +66,21 @@ class AirtablePush:
     def _transform_record(self, item: Dict) -> Dict:
         """
         Transform a scraper result into Airtable field format.
-        Matches your schema: URL, Niche, Title
+        Matches Links table schema.
         """
+        from datetime import datetime, timezone
+        scraped_at = item.get("scraped_at", "")
+
         return {
             "fields": {
                 "URL": item.get("url", ""),
-                "Niche": item.get("niche", ""),
+                "Niche": item.get("niche", "").capitalize() if item.get("niche") else "",
                 "Title": item.get("title", ""),
+                "Gif ID": item.get("gif_id", ""),
+                "Tags": ", ".join(item.get("tags", [])),
+                "Scraped At": scraped_at,
+                "Status": "Scraped",
+                "Repost Count": 0,
             }
         }
 

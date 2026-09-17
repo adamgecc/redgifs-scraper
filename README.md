@@ -24,15 +24,16 @@ A clean, modular Python scraper for collecting RedGifs niche content via the v2 
 ```
 redgifs_scraper/
 ├── scraper.py            # Main scraper — RedGifs v2 API
-├── adspower_proxy.py     # AdsPower proxy integration module
-├── airtable_push.py      # Airtable push module (REST API)
-├── requirements.txt      # Python dependencies
+├── adspower_proxy.py      # AdsPower proxy integration module
+├── airtable_push.py       # Airtable push module (REST API)
+├── airtable_schema.py     # Airtable schema builder (creates tables)
+├── assign.py              # Auto-assignment module (links → accounts)
+├── reddit_poster.py       # Reddit auto-poster (AdsPower + Playwright)
+├── requirements.txt       # Python dependencies
 ├── LICENSE                # MIT License
 ├── README.md             # You are here
-└── data/                 # Output directory (auto-created)
-    ├── blowjob_results.json
-    ├── amateur_results.json
-    └── all_results.json
+├── data/                 # Output directory (auto-created)
+└── screenshots/           # Error screenshots (auto-created)
 ```
 
 ## 🚀 Quick Start
