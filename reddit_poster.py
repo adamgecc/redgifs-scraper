@@ -696,8 +696,12 @@ class RedditPoster:
 
             # Check account status
             account_status = account_fields.get("Account Status", "")
-            if account_status in ["Banned", "Cooldown", "Warming Up"]:
-                print(f"    [!] Account status is '{account_status}' — skipping")
+            if account_status == "Banned":
+                print(f"    [!] Account is Banned — skipping")
+                continue
+            # Only post from Active accounts
+            if account_status != "Active":
+                print(f"    [!] Account status is '{account_status}' (not Active) — skipping")
                 continue
 
             # Get AdsPower profile ID — stored in Notes or a custom field
