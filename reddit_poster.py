@@ -49,12 +49,46 @@ except ImportError:
 
 
 class AdsPowerController:
-    """Controls AdsPower browser profiles via local API."""
+    """Controls AdsPower browser profiles via local or remote API."""
 
     API_BASE = "http://local.adspower.net:50325"
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, api_key: str = None, ssh_host: str = None):
+        """
+        Args:
+            headless: run browser headless
+            api_key: AdsPower API key (required for Mac Mini, optional for local)
+            ssh_host: if set, route API calls through SSH tunnel to remote machine
+        """
         self.headless = headless
+        self.api_key = api_key
+        self.ssh_host = ssh_host
+        self.headers = {}
+        if api_key:
+            self.headers["Authorization"] = f"Bearer {api_key}"
+
+    def _api_get(self, path: str, params: dict = None) -> dict:
+        """Make a GET request to AdsPower API, optionally via SSH tunnel."""
+        if self.ssh_host:
+            # Build curl command to run on remote machine via SSH
+            url = f"{self.API_BASE}{path}"
+            curl_cmd = f'curl -s -H "Authorization: Bearer {self.api_key}" "{url}'
+            if params:
+                query = "&".join(f"{k}={v}" for k, v in params.items())
+                curl_cmd += f"?{query}"
+            curl_cmd += '"'
+            import subprocess
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=10", self.ssh_host, curl_cmd],
+                capture_output=True, text=True, timeout=60
+            )
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError:
+                return {"code": -1, "msg": f"SSH parse error: {result.stdout[:200]}"}
+        else:
+            resp = requests.get(f"{self.API_BASE}{path}", headers=self.headers, params=params, timeout=60)
+            return resp.json()
 
     def start_profile(self, user_id: str) -> Optional[Dict]:
         """
@@ -62,59 +96,52 @@ class AdsPowerController:
         Returns connection info (CDP WebSocket URL, debug port) or None on failure.
         """
         params = {"user_id": user_id, "headless": 1 if self.headless else 0}
-        try:
-            resp = requests.get(
-                f"{self.API_BASE}/api/v1/browser/start",
-                params=params,
-                timeout=60
-            )
-            data = resp.json()
+        data = self._api_get("/api/v1/browser/start", params)
 
-            if data.get("code") != 0:
-                print(f"    [!] AdsPower start failed: {data.get('msg', 'unknown')}")
-                return None
-
-            conn = data.get("data", {})
-            ws_url = conn.get("ws", {}).get("puppeteer", "")
-            debug_port = conn.get("debug_port", "")
-
-            if not ws_url:
-                print("    [!] No CDP WebSocket URL returned")
-                return None
-
-            return {
-                "ws_url": ws_url,
-                "debug_port": debug_port,
-                "webdriver": conn.get("webdriver", ""),
-            }
-
-        except requests.exceptions.RequestException as e:
-            print(f"    [!] AdsPower API error: {e}")
+        if data.get("code") != 0:
+            print(f"    [!] AdsPower start failed: {data.get('msg', 'unknown')}")
             return None
+
+        conn = data.get("data", {})
+        ws_url = conn.get("ws", {}).get("puppeteer", "")
+        debug_port = conn.get("debug_port", "")
+
+        if not ws_url:
+            print("    [!] No CDP WebSocket URL returned")
+            return None
+
+        return {
+            "ws_url": ws_url,
+            "debug_port": debug_port,
+            "webdriver": conn.get("webdriver", ""),
+        }
 
     def stop_profile(self, user_id: str) -> bool:
         """Stop an AdsPower browser profile."""
-        try:
-            resp = requests.get(
-                f"{self.API_BASE}/api/v1/browser/stop",
-                params={"user_id": user_id},
-                timeout=10
-            )
-            return resp.json().get("code") == 0
-        except requests.exceptions.RequestException:
-            return False
+        data = self._api_get("/api/v1/browser/stop", {"user_id": user_id})
+        return data.get("code") == 0
 
     def check_active(self, user_id: str) -> bool:
         """Check if a profile is already running."""
-        try:
-            resp = requests.get(
-                f"{self.API_BASE}/api/v1/browser/active",
-                params={"user_id": user_id},
-                timeout=10
-            )
-            return resp.json().get("code") == 0
-        except requests.exceptions.RequestException:
-            return False
+        data = self._api_get("/api/v1/browser/active", {"user_id": user_id})
+        return data.get("code") == 0
+
+    def list_profiles(self) -> List[Dict]:
+        """List all AdsPower profiles."""
+        all_profiles = []
+        page = 1
+        while True:
+            data = self._api_get("/api/v1/user/list", {"page": page, "page_size": 100})
+            if data.get("code") != 0:
+                break
+            profiles = data.get("data", {}).get("list", [])
+            if not profiles:
+                break
+            all_profiles.extend(profiles)
+            if len(profiles) < 100:
+                break
+            page += 1
+        return all_profiles
 
 
 class HumanBehavior:
@@ -201,6 +228,8 @@ class RedditPoster:
         accounts_table: str = "Accounts",
         screenshot_dir: str = "screenshots",
         headless: bool = True,
+        adspower_api_key: str = None,
+        adspower_ssh_host: str = None,
     ):
         self.airtable_token = airtable_token
         self.airtable_base = airtable_base
@@ -209,7 +238,11 @@ class RedditPoster:
         self.screenshot_dir = screenshot_dir
         self.headless = headless
 
-        self.adspower = AdsPowerController(headless=headless)
+        self.adspower = AdsPowerController(
+            headless=headless,
+            api_key=adspower_api_key,
+            ssh_host=adspower_ssh_host,
+        )
         self.at_headers = {
             "Authorization": f"Bearer {airtable_token}",
             "Content-Type": "application/json",
@@ -806,11 +839,32 @@ def main():
     parser.add_argument("--account", type=str, help="Only post for this account name")
     parser.add_argument("--no-headless", action="store_true", help="Show browser (debug mode)")
     parser.add_argument("--screenshot-dir", default="screenshots", help="Directory for error screenshots")
+    parser.add_argument("--adspower-key", default=os.getenv("ADSPOWER_API_KEY"), help="AdsPower API key (or set ADSPOWER_API_KEY env var)")
+    parser.add_argument("--adspower-ssh", default=os.getenv("ADSPOWER_SSH_HOST"), help="SSH host for remote AdsPower (e.g. macmini) or set ADSPOWER_SSH_HOST env var")
+    parser.add_argument("--list-profiles", action="store_true", help="List all AdsPower profiles and exit")
 
     args = parser.parse_args()
 
     if not args.token or not args.base_id:
         print("[!] Missing credentials. Use --token and --base-id or set AIRTABLE_PAT and AIRTABLE_BASE_ID env vars.")
+        return
+
+    # Handle --list-profiles
+    if args.list_profiles:
+        controller = AdsPowerController(
+            api_key=args.adspower_key,
+            ssh_host=args.adspower_ssh,
+        )
+        profiles = controller.list_profiles()
+        print(f"\n[*] {len(profiles)} AdsPower Profiles on {'remote (' + args.adspower_ssh + ')' if args.adspower_ssh else 'local'}:\n")
+        for i, p in enumerate(profiles, 1):
+            proxy = p.get("user_proxy_config", {})
+            proxy_type = proxy.get("proxy_soft", "?")
+            if proxy_type == "no_proxy":
+                proxy_str = "no proxy"
+            else:
+                proxy_str = f"{proxy.get('proxy_type','?')} {proxy.get('proxy_host','?')}:{proxy.get('proxy_port','?')}"
+            print(f"  {i:>3}. {p.get('user_id','?'):<12} | {p.get('name','?'):<25} | {proxy_str}")
         return
 
     if not args.post:
@@ -824,6 +878,8 @@ def main():
         accounts_table=args.accounts_table,
         screenshot_dir=args.screenshot_dir,
         headless=not args.no_headless,
+        adspower_api_key=args.adspower_key,
+        adspower_ssh_host=args.adspower_ssh,
     )
 
     poster.run(
