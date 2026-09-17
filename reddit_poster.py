@@ -603,19 +603,80 @@ class RedditPoster:
             # Navigate to subreddit submit page — use LINK type to force link post
             submit_url = self.REDDIT_SUBMIT_LINK.format(subreddit=subreddit)
             print(f"    [*] Navigating to {submit_url}...")
+            # Force the new Reddit UI with post type tabs
+            submit_url = submit_url + ("&" if "?" in submit_url else "?") + "newreddit=true&self=false"
+            
+            # Set desktop viewport size — Reddit serves simplified UI for narrow viewports
+            try:
+                page.set_viewport_size({"width": 1920, "height": 1080})
+                print("    [*] Set viewport to 1920x1080")
+            except:
+                pass
+            
             page.goto(submit_url, wait_until="domcontentloaded", timeout=60000)
             
             # Wait for the page to fully render — the post type tabs (Text/Images/Link/Poll/AMA)
             # load via JavaScript after the initial DOM load
             print("    [*] Waiting for page to fully render...")
-            time.sleep(12)  # Reddit JS is slow to render the full submit form
+            time.sleep(15)
             
+            # Try to find and click the Link tab using JavaScript
+            # The tabs are rendered as faceplate elements — let's find the clickable one
+            print("    [*] Looking for Link tab via JavaScript...")
             try:
-                page.wait_for_selector('input[name="url"], input[type="url"], input[placeholder*="URL"], input[placeholder*="url"], textarea[placeholder*="URL"]', timeout=15000)
-                print("    [+] URL field found on page!")
-            except:
-                print("    [*] URL field not found yet — waiting extra...")
+                # Execute JS to find and click the Link tab
+                link_clicked = page.evaluate("""() => {
+                    // Find all clickable elements containing "Link" text
+                    const allElements = document.querySelectorAll('a, button, div[role="tab"], div[role="button"], span, faceplate-tab');
+                    for (const el of allElements) {
+                        const text = (el.textContent || '').trim();
+                        if (text === 'Link' || text === 'link') {
+                            // Check if it's visible
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                // Check if parent context has Text/Images (post type tabs row)
+                                let parent = el;
+                                for (let i = 0; i < 5; i++) {
+                                    parent = parent.parentElement;
+                                    if (!parent) break;
+                                    const pText = parent.textContent || '';
+                                    if (pText.includes('Text') && pText.includes('Images')) {
+                                        el.click();
+                                        return 'clicked: found in tab row with Text/Images';
+                                    }
+                                }
+                                // Even if not in tab row, try clicking if it looks like a tab
+                                if (el.tagName === 'FACEPLATE-TAB' || el.getAttribute('role') === 'tab' || el.getAttribute('role') === 'button') {
+                                    el.click();
+                                    return 'clicked: tag=' + el.tagName + ' role=' + el.getAttribute('role');
+                                }
+                            }
+                        }
+                    }
+                    return 'not found';
+                }""")
+                print(f"    [*] JS result: {link_clicked}")
+            except Exception as e:
+                print(f"    [!] JS error: {e}")
+            
+            # Wait for URL field to appear after clicking Link tab
+            time.sleep(3)
+            
+            url_field_found = False
+            for attempt in range(6):
+                try:
+                    url_check = page.locator('input[name="url"], input[type="url"], input[placeholder*="URL"], input[placeholder*="url"], input[placeholder*="Url"], textarea[placeholder*="URL"]')
+                    if url_check.count() > 0 and url_check.first.is_visible():
+                        print(f"    [+] URL field found after {(attempt+1)*5}s!")
+                        url_field_found = True
+                        break
+                except:
+                    pass
+                print(f"    [*] Waiting for URL field... ({(attempt+1)*5}s)")
                 time.sleep(5)
+            
+            if not url_field_found:
+                print("    [!] URL field never appeared")
             
             HumanBehavior.random_delay(2, 4)
 
@@ -656,55 +717,39 @@ class RedditPoster:
             # We need to click the "Link" tab that's in the same row as "Text" and "Images"
             print("    [*] Looking for Link post type tab...")
             
+            # The link icon is inside a Shadow DOM of <post-composer-standalone-toolbar>
+            # Click it by coordinates (the button is at the start of the toolbar)
             try:
-                # Find all VISIBLE elements containing "Link" text
-                all_link_elements = page.locator('text="Link"')
-                count = all_link_elements.count()
-                print(f"    [*] Found {count} elements with text 'Link'")
-
-                clicked_link_tab = False
-                for idx in range(count):
-                    try:
-                        el = all_link_elements.nth(idx)
-                        # Check if element is visible
-                        if not el.is_visible():
-                            continue
-
-                        # Get the parent context to check if this is the post type tab
-                        parent_text = el.evaluate("""el => {
-                            let p = el;
-                            for (let i = 0; i < 5; i++) {
-                                p = p.parentElement;
-                                if (!p) break;
-                                const text = p.textContent || '';
-                                if (text.includes('Text') && text.includes('Images') && (text.includes('Poll') || text.includes('AMA'))) {
-                                    return text;
-                                }
-                            }
-                            return '';
-                        }""")
-
-                        if parent_text and ("Text" in parent_text and "Images" in parent_text):
-                            print(f"    [*] Found Link tab in post type row — clicking...")
-                            el.click()
-                            HumanBehavior.random_delay(2, 4)
-                            clicked_link_tab = True
-                            break
-                    except:
-                        continue
-
-                if not clicked_link_tab:
-                    # Fallback: click the first VISIBLE "Link" element
-                    print("    [*] Could not identify tab row — clicking first visible 'Link' element...")
-                    for idx in range(count):
-                        el = all_link_elements.nth(idx)
-                        if el.is_visible():
-                            el.click()
-                            HumanBehavior.random_delay(2, 4)
-                            clicked_link_tab = True
-                            break
+                # Get the toolbar position
+                toolbar_pos = page.evaluate("""() => {
+                    const toolbar = document.querySelector('post-composer-standalone-toolbar');
+                    if (!toolbar) return null;
+                    const rect = toolbar.getBoundingClientRect();
+                    // Get the button inside shadow DOM
+                    const sr = toolbar.shadowRoot;
+                    if (sr) {
+                        const btn = sr.querySelector('button');
+                        if (btn) {
+                            const bRect = btn.getBoundingClientRect();
+                            return {x: bRect.x + bRect.width/2, y: bRect.y + bRect.height/2};
+                        }
+                    }
+                    return {x: rect.x + 16, y: rect.y + 16};
+                }""")
+                
+                if toolbar_pos:
+                    click_x = int(toolbar_pos['x'])
+                    click_y = int(toolbar_pos['y'])
+                    print(f"    [*] Clicking Link Embed button at ({click_x}, {click_y})...")
+                    page.mouse.move(click_x, click_y, steps=10)
+                    time.sleep(0.3)
+                    page.mouse.click(click_x, click_y)
+                    time.sleep(3)
+                    print("    [+] Clicked Link Embed button!")
+                else:
+                    print("    [!] Could not find toolbar position")
             except Exception as e:
-                print(f"    [!] Error finding Link tab: {e}")
+                print(f"    [!] Error clicking Link Embed: {e}")
 
             # Take a screenshot after clicking Link tab
             self.take_screenshot(page, "after_link_tab")
@@ -722,6 +767,8 @@ class RedditPoster:
                 'input[placeholder*="url"]',
                 'input[placeholder*="Url"]',
                 'input[placeholder*="link"]',
+                'input[placeholder*="Link"]',
+                'input[placeholder*="Link URL"]',
                 '#post-url',
                 '[data-testid="post-url"]',
             ]
@@ -735,6 +782,38 @@ class RedditPoster:
                         break
                 except:
                     continue
+
+            if not url_filled:
+                # Try finding the URL field by its label text "Link URL"
+                try:
+                    url_field = page.locator('input').filter(has_text="")
+                    # Try all visible inputs
+                    all_visible_inputs = page.evaluate("""() => {
+                        const inputs = document.querySelectorAll('input');
+                        return Array.from(inputs).filter(el => {
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0;
+                        }).map(el => ({
+                            tag: el.tagName,
+                            type: el.getAttribute('type') || '',
+                            name: el.getAttribute('name') || '',
+                            placeholder: el.getAttribute('placeholder') || '',
+                            id: el.id || ''
+                        }));
+                    }""")
+                    print(f"    [*] Visible inputs: {all_visible_inputs}")
+                    
+                    # Try to fill any visible input that looks like a URL field
+                    for inp_info in all_visible_inputs:
+                        if 'url' in (inp_info.get('placeholder','') + inp_info.get('name','') + inp_info.get('id','')).lower():
+                            sel = f'input[placeholder="{inp_info["placeholder"]}"]' if inp_info['placeholder'] else f'#{inp_info["id"]}' if inp_info['id'] else None
+                            if sel and page.locator(sel).count() > 0:
+                                HumanBehavior.type_human(page, sel, url)
+                                url_filled = True
+                                print(f"    [+] URL filled via: {sel}")
+                                break
+                except:
+                    pass
 
             if not url_filled:
                 # No URL field found — paste into body text area instead
@@ -857,24 +936,31 @@ class RedditPoster:
 
             # Method 1: Check if URL changed to the new post
             current_url = page.url
-            if "/comments/" in current_url:
+            if "/comments/" in current_url and "FarmMergeValley" not in current_url and "games_drawer" not in current_url:
                 reddit_post_url = current_url
                 print(f"    [+] Post URL (from redirect): {reddit_post_url}")
 
-            # Method 2: Look for post link on page
+            # Method 2: Look for post link on page — but EXCLUDE promo/game links
             if not reddit_post_url:
                 try:
                     post_links = page.locator('a[href*="/comments/"]')
-                    if post_links.count() > 0:
-                        href = post_links.first.get_attribute("href")
-                        if href:
-                            if href.startswith("/"):
-                                reddit_post_url = f"https://www.reddit.com{href}"
-                            elif not href.startswith("http"):
-                                reddit_post_url = f"https://www.reddit.com/{href}"
-                            else:
-                                reddit_post_url = href
-                            print(f"    [+] Post URL (from link): {reddit_post_url}")
+                    link_count = post_links.count()
+                    for i in range(link_count):
+                        href = post_links.nth(i).get_attribute("href") or ""
+                        # Skip Reddit game promos and sponsored content
+                        if "FarmMergeValley" in href or "games_drawer" in href or "entry_point" in href:
+                            continue
+                        if "sponsored" in href.lower():
+                            continue
+                        # This should be our actual post
+                        if href.startswith("/"):
+                            reddit_post_url = f"https://www.reddit.com{href}"
+                        elif not href.startswith("http"):
+                            reddit_post_url = f"https://www.reddit.com/{href}"
+                        else:
+                            reddit_post_url = href
+                        print(f"    [+] Post URL (from link): {reddit_post_url}")
+                        break
                 except:
                     pass
 
