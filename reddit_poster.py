@@ -53,19 +53,42 @@ class AdsPowerController:
 
     API_BASE = "http://local.adspower.net:50325"
 
-    def __init__(self, headless: bool = True, api_key: str = None, ssh_host: str = None):
+    def __init__(self, headless: bool = True, api_key: str = None, ssh_host: str = None,
+                 rotation_url: str = None):
         """
         Args:
             headless: run browser headless
             api_key: AdsPower API key (required for Mac Mini, optional for local)
             ssh_host: if set, route API calls through SSH tunnel to remote machine
+            rotation_url: proxy rotation link to hit between accounts (fresh IP)
         """
         self.headless = headless
         self.api_key = api_key
         self.ssh_host = ssh_host
+        self.rotation_url = rotation_url
         self.headers = {}
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
+
+    def rotate_ip(self):
+        """Hit the proxy rotation link to get a fresh IP."""
+        if not self.rotation_url:
+            return
+
+        print("    [*] Rotating proxy IP...")
+        try:
+            if self.ssh_host:
+                import subprocess
+                result = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=10", self.ssh_host, f'curl -s -L "{self.rotation_url}"'],
+                    capture_output=True, text=True, timeout=30
+                )
+                print(f"        [+] Rotation response: {result.stdout[:100]}")
+            else:
+                resp = requests.get(self.rotation_url, timeout=30, allow_redirects=True)
+                print(f"        [+] Rotation response: {resp.text[:100]}")
+        except Exception as e:
+            print(f"        [!] Rotation failed: {e}")
 
     def _api_get(self, path: str, params: dict = None) -> dict:
         """Make a GET request to AdsPower API, optionally via SSH tunnel."""
@@ -230,6 +253,7 @@ class RedditPoster:
         headless: bool = True,
         adspower_api_key: str = None,
         adspower_ssh_host: str = None,
+        adspower_rotation_url: str = None,
     ):
         self.airtable_token = airtable_token
         self.airtable_base = airtable_base
@@ -242,6 +266,7 @@ class RedditPoster:
             headless=headless,
             api_key=adspower_api_key,
             ssh_host=adspower_ssh_host,
+            rotation_url=adspower_rotation_url,
         )
         self.at_headers = {
             "Authorization": f"Bearer {airtable_token}",
@@ -822,6 +847,10 @@ class RedditPoster:
                 # Stop AdsPower browser
                 print(f"    [*] Stopping AdsPower profile...")
                 self.adspower.stop_profile(adspower_id)
+
+                # Rotate proxy IP for next account
+                self.adspower.rotate_ip()
+
                 time.sleep(random.uniform(3, 8))  # Cooldown between accounts
 
         # Summary
@@ -845,6 +874,7 @@ def main():
     parser.add_argument("--screenshot-dir", default="screenshots", help="Directory for error screenshots")
     parser.add_argument("--adspower-key", default=os.getenv("ADSPOWER_API_KEY"), help="AdsPower API key (or set ADSPOWER_API_KEY env var)")
     parser.add_argument("--adspower-ssh", default=os.getenv("ADSPOWER_SSH_HOST"), help="SSH host for remote AdsPower (e.g. macmini) or set ADSPOWER_SSH_HOST env var")
+    parser.add_argument("--rotation-url", default=os.getenv("ADSPOWER_ROTATION_URL", "https://i.fxdx.in/actionlinks/do/changeip/SSeRX4OdQPaOy6WhBgqzag"), help="Proxy IP rotation link (or set ADSPOWER_ROTATION_URL env var)")
     parser.add_argument("--list-profiles", action="store_true", help="List all AdsPower profiles and exit")
 
     args = parser.parse_args()
@@ -884,6 +914,7 @@ def main():
         headless=not args.no_headless,
         adspower_api_key=args.adspower_key,
         adspower_ssh_host=args.adspower_ssh,
+        adspower_rotation_url=args.rotation_url,
     )
 
     poster.run(
