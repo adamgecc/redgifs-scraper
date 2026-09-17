@@ -215,7 +215,7 @@ class AutoAssigner:
                         continue
 
                     # Get account details
-                    account_name = self._get_account_field(account, "Account Name", "Unknown")
+                    account_name = self._get_account_field(account, "Username", "Unknown")
                     employee = self._get_account_field(account, "Assigned Employee", None)
                     subreddits = self._parse_subreddits(self._get_account_field(account, "Subreddits", ""))
 

@@ -117,6 +117,8 @@ class AdsPowerController:
         """
         Start an AdsPower browser profile.
         Returns connection info (CDP WebSocket URL, debug port) or None on failure.
+        When using SSH, sets up an SSH tunnel so Playwright on the local machine
+        can connect to the remote CDP endpoint.
         """
         params = {"user_id": user_id, "headless": 1 if self.headless else 0}
         data = self._api_get("/api/v1/browser/start", params)
@@ -133,16 +135,65 @@ class AdsPowerController:
             print("    [!] No CDP WebSocket URL returned")
             return None
 
+        # If using SSH, we need to tunnel the CDP port to local
+        if self.ssh_host:
+            import subprocess
+            import re
+
+            # Extract the port from the WebSocket URL (e.g. ws://127.0.0.1:59019/...)
+            port_match = re.search(r':(\d+)', ws_url)
+            if not port_match:
+                print(f"    [!] Could not extract port from WebSocket URL: {ws_url}")
+                return None
+
+            remote_port = int(port_match.group(1))
+            local_port = remote_port  # Use same port locally
+
+            # Kill any existing tunnel on this port
+            subprocess.run(["lsof", "-ti", f":{local_port}"], capture_output=True)
+            subprocess.run(["bash", "-c", f"lsof -ti :{local_port} | xargs kill -9 2>/dev/null"], capture_output=True)
+
+            # Start SSH tunnel: local_port -> remote 127.0.0.1:remote_port
+            print(f"    [*] Starting SSH tunnel: localhost:{local_port} → {self.ssh_host}:{remote_port}")
+            tunnel = subprocess.Popen(
+                ["ssh", "-o", "ConnectTimeout=10", "-L", f"{local_port}:127.0.0.1:{remote_port}", "-N", self.ssh_host],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(2)  # Wait for tunnel to establish
+
+            # Replace the WebSocket URL to use localhost
+            ws_url_local = ws_url  # Already uses 127.0.0.1, which now tunnels to remote
+            print(f"    [+] Tunnel established. CDP: {ws_url_local}")
+
+            return {
+                "ws_url": ws_url_local,
+                "debug_port": str(local_port),
+                "webdriver": conn.get("webdriver", ""),
+                "_tunnel_pid": tunnel.pid,
+            }
+
         return {
             "ws_url": ws_url,
             "debug_port": debug_port,
             "webdriver": conn.get("webdriver", ""),
         }
 
-    def stop_profile(self, user_id: str) -> bool:
-        """Stop an AdsPower browser profile."""
+    def stop_profile(self, user_id: str, tunnel_pid: int = None) -> bool:
+        """Stop an AdsPower browser profile and kill SSH tunnel if exists."""
         data = self._api_get("/api/v1/browser/stop", {"user_id": user_id})
-        return data.get("code") == 0
+        success = data.get("code") == 0
+
+        # Kill SSH tunnel if we started one
+        if tunnel_pid:
+            import subprocess
+            try:
+                subprocess.run(["kill", str(tunnel_pid)], capture_output=True)
+                print(f"    [+] SSH tunnel closed (PID {tunnel_pid})")
+            except:
+                pass
+
+        return success
 
     def check_active(self, user_id: str) -> bool:
         """Check if a profile is already running."""
@@ -354,7 +405,7 @@ class RedditPoster:
         if account_name:
             formula = f'AND({{Status}} = "Queued", {{Assigned Account}} = "{account_name}")'
         else:
-            formula = '{{Status}} = "Queued"'
+            formula = '{Status} = "Queued"'
 
         records = self._at_get(self.links_table, filter_formula=formula)
 
@@ -366,7 +417,7 @@ class RedditPoster:
 
     def get_account_info(self, account_name: str) -> Optional[Dict]:
         """Get account info from Accounts table."""
-        formula = f'{{Account Name}} = "{account_name}"'
+        formula = f'{{Username}} = "{account_name}"'
         records = self._at_get(self.accounts_table, filter_formula=formula)
         if records:
             return records[0]
@@ -394,8 +445,8 @@ class RedditPoster:
         Returns True if login successful, False otherwise.
         """
         print("    [*] Navigating to Reddit login...")
-        page.goto(self.REDDIT_LOGIN, wait_until="networkidle", timeout=30000)
-        HumanBehavior.random_delay(2, 4)
+        page.goto(self.REDDIT_LOGIN, wait_until="domcontentloaded", timeout=60000)
+        HumanBehavior.random_delay(3, 6)
 
         # Check if already logged in
         if self._is_logged_in(page):
@@ -404,51 +455,102 @@ class RedditPoster:
 
         # Fill username
         print("    [*] Entering username...")
-        try:
-            HumanBehavior.type_human(page, 'input[name="username"]', username)
-            HumanBehavior.random_delay(0.5, 1.5)
+        username_selectors = [
+            'input[name="username"]',
+            'input[name="email"]',
+            'input[placeholder*="username"]',
+            'input[placeholder*="email"]',
+            'input[placeholder*="Email or username"]',
+        ]
+        username_filled = False
+        for sel in username_selectors:
+            try:
+                if page.locator(sel).count() > 0:
+                    HumanBehavior.type_human(page, sel, username)
+                    username_filled = True
+                    break
+            except:
+                continue
 
-            # Fill password
-            print("    [*] Entering password...")
-            HumanBehavior.type_human(page, 'input[name="password"]', password)
-            HumanBehavior.random_delay(0.5, 1.5)
+        if not username_filled:
+            screenshot = self.take_screenshot(page, "username_field_not_found")
+            return False
 
-            # Click login button
-            print("    [*] Clicking login button...")
-            HumanBehavior.move_and_click(page, 'button[type="submit"]')
+        HumanBehavior.random_delay(0.5, 1.5)
 
-            # Wait for navigation or error
-            time.sleep(5)
+        # Fill password
+        print("    [*] Entering password...")
+        password_selectors = [
+            'input[name="password"]',
+            'input[type="password"]',
+            'input[placeholder*="password"]',
+        ]
+        password_filled = False
+        for sel in password_selectors:
+            try:
+                if page.locator(sel).count() > 0:
+                    HumanBehavior.type_human(page, sel, password)
+                    password_filled = True
+                    break
+            except:
+                continue
 
-            if self._is_logged_in(page):
-                print("    [+] Login successful!")
-                return True
-            else:
-                print("    [!] Login may have failed — checking for errors...")
+        if not password_filled:
+            screenshot = self.take_screenshot(page, "password_field_not_found")
+            return False
 
-                # Screenshot for debugging
-                self.take_screenshot(page, "login_failed")
+        HumanBehavior.random_delay(0.5, 1.5)
 
-                # Check for 2FA / captcha
-                page_text = page.inner_text("body")
-                if "two-factor" in page_text.lower() or "2fa" in page_text.lower():
-                    print("    [!] 2FA detected — skipping this account")
-                    return False
-                if "captcha" in page_text.lower():
-                    print("    [!] Captcha detected — skipping this account")
-                    return False
-                if "incorrect" in page_text.lower() or "wrong" in page_text.lower():
-                    print("    [!] Wrong credentials — skipping")
-                    return False
+        # Click login button
+        print("    [*] Clicking login button...")
+        login_selectors = [
+            'button[type="submit"]',
+            'button:has-text("Log In")',
+            'button:has-text("Login")',
+            'button:has-text("log in")',
+            '[data-testid="login-button"]',
+            'button[data-testid="login-button"]',
+        ]
+        clicked = False
+        for sel in login_selectors:
+            try:
+                if page.locator(sel).count() > 0:
+                    HumanBehavior.move_and_click(page, sel)
+                    clicked = True
+                    break
+            except:
+                continue
 
+        if not clicked:
+            # Fallback: press Enter on the password field
+            print("    [*] Button not found — pressing Enter on password field...")
+            page.press('input[type="password"]', "Enter")
+
+        # Wait for navigation or error
+        time.sleep(8)
+
+        if self._is_logged_in(page):
+            print("    [+] Login successful!")
+            return True
+        else:
+            print("    [!] Login may have failed — checking for errors...")
+
+            # Screenshot for debugging
+            self.take_screenshot(page, "login_failed")
+
+            # Check for 2FA / captcha
+            page_text = page.inner_text("body")
+            if "two-factor" in page_text.lower() or "2fa" in page_text.lower():
+                print("    [!] 2FA detected — skipping this account")
+                return False
+            if "captcha" in page_text.lower():
+                print("    [!] Captcha detected — skipping this account")
+                return False
+            if "incorrect" in page_text.lower() or "wrong" in page_text.lower():
+                print("    [!] Wrong credentials — skipping")
                 return False
 
-        except PlaywrightTimeout:
-            print("    [!] Timeout during login")
-            self.take_screenshot(page, "login_timeout")
             return False
-        except Exception as e:
-            print(f"    [!] Login error: {e}")
             self.take_screenshot(page, "login_error")
             return False
 
@@ -456,7 +558,7 @@ class RedditPoster:
         """Check if the Reddit session is active."""
         try:
             # Check for user menu / logged in indicators
-            page.wait_for_load_state("networkidle", timeout=5000)
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
 
             # Check URL — if we're not on login page, we're likely logged in
             if "/account/login" in page.url:
@@ -491,14 +593,34 @@ class RedditPoster:
     def post_link(self, page: Page, subreddit: str, url: str, title: str) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Post a link to a subreddit.
+        Reddit's new submit page has Title + Body (rich text editor).
+        We paste the RedGifs URL into the body and submit.
+
         Returns (success, reddit_post_url, error_screenshot_path).
         """
         try:
             # Navigate to subreddit submit page
             submit_url = self.REDDIT_SUBMIT_SUB.format(subreddit=subreddit)
             print(f"    [*] Navigating to {submit_url}...")
-            page.goto(submit_url, wait_until="networkidle", timeout=30000)
-            HumanBehavior.random_delay(2, 5)
+            page.goto(submit_url, wait_until="domcontentloaded", timeout=60000)
+            HumanBehavior.random_delay(3, 6)
+
+            # Handle mature content popup if it appears on the submit page
+            mature_selectors_pre = [
+                'button:has-text("Yes")',
+                'button:has-text("I\'m Over 18")',
+                'button:has-text("I am 18")',
+                'button:has-text("over 18")',
+            ]
+            for sel in mature_selectors_pre:
+                try:
+                    if page.locator(sel).count() > 0:
+                        print(f"    [*] Mature content popup on submit page — clicking: {sel}")
+                        HumanBehavior.move_and_click(page, sel)
+                        HumanBehavior.random_delay(2, 4)
+                        break
+                except:
+                    continue
 
             # Check if subreddit allows link posts
             page_text = page.inner_text("body")
@@ -512,52 +634,14 @@ class RedditPoster:
             print("    [*] Simulating browsing behavior...")
             HumanBehavior.browse_before_posting(page)
 
-            # Select "Link" post type if needed
-            link_tab_selectors = [
-                'button:has-text("Link")',
-                '[data-testid="tab-link"]',
-                'a:has-text("Link")',
-            ]
-            for sel in link_tab_selectors:
-                try:
-                    if page.locator(sel).count() > 0:
-                        HumanBehavior.move_and_click(page, sel)
-                        HumanBehavior.random_delay(1, 2)
-                        break
-                except:
-                    continue
-
-            # Fill in URL
-            print("    [*] Entering URL...")
-            url_selectors = [
-                'input[name="url"]',
-                'textarea[placeholder*="URL"]',
-                'input[placeholder*="url"]',
-                'input[placeholder*="Url"]',
-            ]
-            url_filled = False
-            for sel in url_selectors:
-                try:
-                    if page.locator(sel).count() > 0:
-                        HumanBehavior.type_human(page, sel, url)
-                        url_filled = True
-                        break
-                except:
-                    continue
-
-            if not url_filled:
-                screenshot = self.take_screenshot(page, "url_field_not_found")
-                return False, None, screenshot
-
-            HumanBehavior.random_delay(1, 3)
-
             # Fill in title
             print("    [*] Entering title...")
             title_selectors = [
-                'textarea[name="title"]',
-                'input[name="title"]',
                 'textarea[placeholder*="Title"]',
-                'div[role="textbox"]',
+                'input[placeholder*="Title"]',
+                'div[role="textbox"][contenteditable="true"]',
+                '#post-title',
+                '[data-testid="post-title"]',
             ]
             title_filled = False
             for sel in title_selectors:
@@ -565,6 +649,7 @@ class RedditPoster:
                     if page.locator(sel).count() > 0:
                         HumanBehavior.type_human(page, sel, title)
                         title_filled = True
+                        print(f"    [+] Title filled via selector: {sel}")
                         break
                 except:
                     continue
@@ -573,19 +658,87 @@ class RedditPoster:
                 screenshot = self.take_screenshot(page, "title_field_not_found")
                 return False, None, screenshot
 
+            HumanBehavior.random_delay(1, 3)
+
+            # Fill URL into body — Reddit's new UI has a rich text body area
+            # We paste the RedGifs link there. Reddit will auto-embed it.
+            print("    [*] Entering URL into body...")
+            body_selectors = [
+                'div[contenteditable="true"][role="textbox"]',
+                'textarea[placeholder*="Body"]',
+                'textarea[placeholder*="body"]',
+                'div[role="textbox"]',
+                '.RichTextEditor-root [contenteditable="true"]',
+                '[data-testid="post-body"]',
+            ]
+            body_filled = False
+            for sel in body_selectors:
+                try:
+                    # Skip the title field (it's also contenteditable)
+                    if "Title" in sel or "title" in sel.lower():
+                        continue
+                    if page.locator(sel).count() > 0:
+                        # For contenteditable divs, we need to click then type
+                        HumanBehavior.move_and_click(page, sel)
+                        HumanBehavior.random_delay(0.3, 0.8)
+                        # Paste the URL
+                        page.keyboard.type(url, delay=random.randint(30, 80))
+                        body_filled = True
+                        print(f"    [+] URL entered into body via selector: {sel}")
+                        break
+                except:
+                    continue
+
+            if not body_filled:
+                # Fallback: try clicking the link icon in the toolbar
+                print("    [*] Body field not found — trying link icon in toolbar...")
+                link_icon_selectors = [
+                    'button[aria-label*="Link"]',
+                    'button[aria-label*="link"]',
+                    'button[title*="Link"]',
+                    'button:has-text("Link")',
+                ]
+                for sel in link_icon_selectors:
+                    try:
+                        if page.locator(sel).count() > 0:
+                            HumanBehavior.move_and_click(page, sel)
+                            HumanBehavior.random_delay(0.5, 1.5)
+                            # A URL input should appear
+                            url_input_selectors = [
+                                'input[placeholder*="URL"]',
+                                'input[placeholder*="url"]',
+                                'input[type="url"]',
+                                'input[placeholder*="link"]',
+                            ]
+                            for usel in url_input_selectors:
+                                if page.locator(usel).count() > 0:
+                                    HumanBehavior.type_human(page, usel, url)
+                                    body_filled = True
+                                    print(f"    [+] URL entered via link dialog: {usel}")
+                                    break
+                            if body_filled:
+                                break
+                    except:
+                        continue
+
+            if not body_filled:
+                screenshot = self.take_screenshot(page, "body_field_not_found")
+                return False, None, screenshot
+
             HumanBehavior.random_delay(1, 2)
 
             # Mouse movement before submit
             HumanBehavior.mouse_move_random(page)
             HumanBehavior.random_delay(0.5, 1.5)
 
-            # Click submit
-            print("    [*] Clicking submit...")
+            # Click submit — Reddit's new UI uses "Post" button
+            print("    [*] Clicking Post button...")
             submit_selectors = [
-                'button[type="submit"]',
                 'button:has-text("Post")',
                 'button:has-text("Submit")',
+                'button[type="submit"]',
                 '[data-testid="submit-button"]',
+                'button[data-testid="submit-post-button"]',
             ]
             submitted = False
             for sel in submit_selectors:
@@ -593,6 +746,7 @@ class RedditPoster:
                     if page.locator(sel).count() > 0:
                         HumanBehavior.move_and_click(page, sel)
                         submitted = True
+                        print(f"    [+] Clicked: {sel}")
                         break
                 except:
                     continue
@@ -604,6 +758,23 @@ class RedditPoster:
             # Wait for post to go through
             print("    [*] Waiting for post to submit...")
             time.sleep(random.uniform(5, 10))
+
+            # Handle mature content popup if it appears
+            mature_selectors = [
+                'button:has-text("Yes")',
+                'button:has-text("I\'m Over 18")',
+                'button:has-text("I am 18")',
+                'button:has-text("over 18")',
+            ]
+            for sel in mature_selectors:
+                try:
+                    if page.locator(sel).count() > 0:
+                        print(f"    [*] Mature content popup — clicking: {sel}")
+                        HumanBehavior.move_and_click(page, sel)
+                        HumanBehavior.random_delay(2, 4)
+                        break
+                except:
+                    continue
 
             # Check for rate limit
             page_text = page.inner_text("body")
@@ -646,7 +817,6 @@ class RedditPoster:
 
             if not reddit_post_url:
                 # Even if we can't find the URL, the post might have succeeded
-                # Check for success indicators
                 if "submitted" in page_text.lower() or "your post" in page_text.lower():
                     print("    [+] Post appears successful (URL not found)")
                     return True, None, None
@@ -733,7 +903,7 @@ class RedditPoster:
             adspower_id = account_fields.get("AdsPower ID", "") or account_fields.get("Notes", "")
 
             # Get credentials
-            reddit_username = account_fields.get("Account Name", account_name)
+            reddit_username = account_fields.get("Username", account_name)
             reddit_password = account_fields.get("Password", "") or account_fields.get("Notes", "")
 
             if not adspower_id:
@@ -750,6 +920,7 @@ class RedditPoster:
                 continue
 
             ws_url = conn["ws_url"]
+            tunnel_pid = conn.get("_tunnel_pid")
 
             try:
                 with sync_playwright() as pw:
@@ -846,7 +1017,7 @@ class RedditPoster:
             finally:
                 # Stop AdsPower browser
                 print(f"    [*] Stopping AdsPower profile...")
-                self.adspower.stop_profile(adspower_id)
+                self.adspower.stop_profile(adspower_id, tunnel_pid=tunnel_pid)
 
                 # Rotate proxy IP for next account
                 self.adspower.rotate_ip()
@@ -881,6 +1052,7 @@ def main():
 
     if not args.token or not args.base_id:
         print("[!] Missing credentials. Use --token and --base-id or set AIRTABLE_PAT and AIRTABLE_BASE_ID env vars.")
+        print(f"    token={'set' if args.token else 'MISSING'}, base_id={'set' if args.base_id else 'MISSING'}")
         return
 
     # Handle --list-profiles
