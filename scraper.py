@@ -522,8 +522,8 @@ def main():
                         default=os.getenv("AIRTABLE_BASE_ID"),
                         help="Airtable base ID (or set AIRTABLE_BASE_ID env var)")
     parser.add_argument("--airtable-table", type=str,
-                        default=os.getenv("AIRTABLE_TABLE_NAME", "Links"),
-                        help='Airtable table name (default: "Links")')
+                        default=os.getenv("AIRTABLE_TABLE_NAME", "RedGifs Links"),
+                        help='Airtable table name (default: "RedGifs Links")')
     parser.add_argument("--no-dedup", action="store_true",
                         help="Skip Airtable deduplication (push all records)")
     parser.add_argument("--list-niches", action="store_true",

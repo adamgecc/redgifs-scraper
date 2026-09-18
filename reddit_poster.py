@@ -715,130 +715,260 @@ class RedditPoster:
             # Try to find and click "Link" post type tab
             # New Reddit UI has tabs at the top: Text | Images | Link | Poll | AMA
             # We need to click the "Link" tab that's in the same row as "Text" and "Images"
-            print("    [*] Looking for Link post type tab...")
+            # Click the Link Embed button inside Shadow DOM of <post-composer-standalone-toolbar>
+            # This button opens the "Add Link" section with a "Link URL *" input field
+            # Shadow DOM elements can't be found by regular CSS selectors — we need JS
+            print("    [*] Finding Link Embed button in Shadow DOM...")
             
-            # The link icon is inside a Shadow DOM of <post-composer-standalone-toolbar>
-            # Click it by coordinates (the button is at the start of the toolbar)
-            try:
-                # Get the toolbar position
-                toolbar_pos = page.evaluate("""() => {
-                    const toolbar = document.querySelector('post-composer-standalone-toolbar');
-                    if (!toolbar) return null;
-                    const rect = toolbar.getBoundingClientRect();
-                    // Get the button inside shadow DOM
-                    const sr = toolbar.shadowRoot;
-                    if (sr) {
-                        const btn = sr.querySelector('button');
-                        if (btn) {
-                            const bRect = btn.getBoundingClientRect();
-                            return {x: bRect.x + bRect.width/2, y: bRect.y + bRect.height/2};
-                        }
-                    }
-                    return {x: rect.x + 16, y: rect.y + 16};
-                }""")
-                
-                if toolbar_pos:
+            link_embed_clicked = False
+            url_field_found = False  # Track if URL was filled via Link URL field
+            
+            # Try multiple times — the toolbar takes time to render
+            for attempt in range(5):
+                try:
+                    toolbar_pos = page.evaluate("""() => {
+                        // Find the toolbar element
+                        const toolbar = document.querySelector('post-composer-standalone-toolbar');
+                        if (!toolbar) return {error: 'toolbar element not found'};
+                        
+                        // Wait for shadow root
+                        if (!toolbar.shadowRoot) return {error: 'no shadow root'};
+                        
+                        // Find the button inside shadow DOM
+                        const btn = toolbar.shadowRoot.querySelector('button');
+                        if (!btn) return {error: 'no button in shadow root'};
+                        
+                        // Get the button's bounding rect
+                        const r = btn.getBoundingClientRect();
+                        if (r.width === 0 || r.height === 0) return {error: 'button not visible', w: r.width, h: r.height};
+                        
+                        return {
+                            x: r.x + r.width / 2,
+                            y: r.y + r.height / 2,
+                            w: r.width,
+                            h: r.height,
+                            text: btn.textContent.trim()
+                        };
+                    }""")
+                    
+                    if toolbar_pos.get('error'):
+                        print(f"    [*] Attempt {attempt+1}: {toolbar_pos['error']}")
+                        time.sleep(3)
+                        continue
+                    
                     click_x = int(toolbar_pos['x'])
                     click_y = int(toolbar_pos['y'])
-                    print(f"    [*] Clicking Link Embed button at ({click_x}, {click_y})...")
+                    
+                    if click_x <= 0 or click_y <= 0:
+                        print(f"    [*] Attempt {attempt+1}: invalid position ({click_x}, {click_y})")
+                        time.sleep(3)
+                        continue
+                    
+                    print(f"    [*] Clicking Link Embed at ({click_x}, {click_y}) — button text: '{toolbar_pos.get('text', '')}'")
                     page.mouse.move(click_x, click_y, steps=10)
-                    time.sleep(0.3)
+                    time.sleep(0.5)
                     page.mouse.click(click_x, click_y)
                     time.sleep(3)
-                    print("    [+] Clicked Link Embed button!")
-                else:
-                    print("    [!] Could not find toolbar position")
-            except Exception as e:
-                print(f"    [!] Error clicking Link Embed: {e}")
-
-            # Take a screenshot after clicking Link tab
-            self.take_screenshot(page, "after_link_tab")
-
-            # Fill in URL — Reddit's submit page sometimes shows a URL field, sometimes doesn't
-            # Try multiple approaches:
-            # 1. Look for a URL input field
-            # 2. If not found, paste URL into the body text area (Reddit auto-detects URLs)
-            print("    [*] Entering URL...")
-            url_selectors = [
-                'input[name="url"]',
-                'input[type="url"]',
-                'textarea[placeholder*="URL"]',
-                'input[placeholder*="URL"]',
-                'input[placeholder*="url"]',
-                'input[placeholder*="Url"]',
-                'input[placeholder*="link"]',
-                'input[placeholder*="Link"]',
-                'input[placeholder*="Link URL"]',
-                '#post-url',
-                '[data-testid="post-url"]',
-            ]
-            url_filled = False
-            for sel in url_selectors:
-                try:
-                    if page.locator(sel).count() > 0 and page.locator(sel).first.is_visible():
-                        HumanBehavior.type_human(page, sel, url)
-                        url_filled = True
-                        print(f"    [+] URL filled via selector: {sel}")
-                        break
-                except:
-                    continue
-
-            if not url_filled:
-                # Try finding the URL field by its label text "Link URL"
-                try:
-                    url_field = page.locator('input').filter(has_text="")
-                    # Try all visible inputs
-                    all_visible_inputs = page.evaluate("""() => {
-                        const inputs = document.querySelectorAll('input');
-                        return Array.from(inputs).filter(el => {
-                            const r = el.getBoundingClientRect();
-                            return r.width > 0 && r.height > 0;
-                        }).map(el => ({
-                            tag: el.tagName,
-                            type: el.getAttribute('type') || '',
-                            name: el.getAttribute('name') || '',
-                            placeholder: el.getAttribute('placeholder') || '',
-                            id: el.id || ''
-                        }));
-                    }""")
-                    print(f"    [*] Visible inputs: {all_visible_inputs}")
+                    print("    [+] Link Embed button clicked!")
+                    link_embed_clicked = True
+                    break
                     
-                    # Try to fill any visible input that looks like a URL field
-                    for inp_info in all_visible_inputs:
-                        if 'url' in (inp_info.get('placeholder','') + inp_info.get('name','') + inp_info.get('id','')).lower():
-                            sel = f'input[placeholder="{inp_info["placeholder"]}"]' if inp_info['placeholder'] else f'#{inp_info["id"]}' if inp_info['id'] else None
-                            if sel and page.locator(sel).count() > 0:
-                                HumanBehavior.type_human(page, sel, url)
-                                url_filled = True
-                                print(f"    [+] URL filled via: {sel}")
-                                break
-                except:
-                    pass
-
-            if not url_filled:
-                # No URL field found — paste into body text area instead
-                # Reddit auto-detects URLs and treats them as link posts
-                print("    [*] No URL field found — pasting URL into body text area...")
-                body_selectors = [
-                    'div[contenteditable="true"][role="textbox"]',
-                    'textarea[placeholder*="Body"]',
-                    'div[role="textbox"]',
-                ]
-                for sel in body_selectors:
+                except Exception as e:
+                    print(f"    [*] Attempt {attempt+1}: error — {e}")
+                    time.sleep(3)
+            
+            # If Shadow DOM button not found, try clicking the chain link icon in the formatting toolbar
+            if not link_embed_clicked:
+                print("    [*] Trying chain link icon in formatting toolbar...")
+                try:
+                    # The formatting toolbar has a link icon (chain link) button
+                    # Find it by looking for buttons/icons in the toolbar area below the body text
+                    link_icon_pos = page.evaluate("""() => {
+                        // Look for buttons that contain a link/chain icon
+                        // These are typically in the formatting toolbar
+                        const buttons = document.querySelectorAll('button, [role="button"], a');
+                        for (const btn of buttons) {
+                            const rect = btn.getBoundingClientRect();
+                            // The formatting toolbar is typically below the body text area (y > 300)
+                            if (rect.y > 250 && rect.y < 500 && rect.x < 400 && rect.width > 10 && rect.width < 50) {
+                                // Check if it contains an SVG (icon)
+                                const svg = btn.querySelector('svg');
+                                if (svg) {
+                                    const svgRect = svg.getBoundingClientRect();
+                                    if (svgRect.width > 0 && svgRect.height > 0) {
+                                        // Check aria-label or title for link
+                                        const aria = btn.getAttribute('aria-label') || '';
+                                        const title = btn.getAttribute('title') || '';
+                                        const text = btn.textContent || '';
+                                        if (aria.toLowerCase().includes('link') || 
+                                            title.toLowerCase().includes('link') ||
+                                            text.toLowerCase().includes('link')) {
+                                            return {x: rect.x + rect.width/2, y: rect.y + rect.height/2, source: 'aria/title match'};
+                                        }
+                                        // If no aria-label, try the first button in the toolbar (usually link)
+                                        // Check if siblings contain bold/italic (formatting toolbar)
+                                        const parent = btn.parentElement;
+                                        if (parent) {
+                                            const pText = parent.textContent || '';
+                                            if (pText.includes('Bold') || pText.includes('bold') || pText.includes('B')) {
+                                                // This is likely the formatting toolbar — first button is usually link
+                                                return {x: rect.x + rect.width/2, y: rect.y + rect.height/2, source: 'formatting toolbar first button'};
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Fallback: find all small buttons in the toolbar area and return the first one
+                        const allBtns = document.querySelectorAll('button');
+                        const candidates = [];
+                        for (const btn of allBtns) {
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.y > 250 && rect.y < 500 && rect.x < 400 && rect.width > 10 && rect.width < 50) {
+                                candidates.push({x: rect.x + rect.width/2, y: rect.y + rect.height/2, w: rect.width});
+                            }
+                        }
+                        if (candidates.length > 0) {
+                            return {x: candidates[0].x, y: candidates[0].y, source: 'first small button in toolbar area'};
+                        }
+                        
+                        return null;
+                    }""")
+                    
+                    if link_icon_pos:
+                        click_x = int(link_icon_pos['x'])
+                        click_y = int(link_icon_pos['y'])
+                        print(f"    [*] Clicking link icon at ({click_x}, {click_y}) — source: {link_icon_pos.get('source', '')}")
+                        page.mouse.move(click_x, click_y, steps=10)
+                        time.sleep(0.5)
+                        page.mouse.click(click_x, click_y)
+                        time.sleep(3)
+                        print("    [+] Link icon clicked!")
+                        link_embed_clicked = True
+                    else:
+                        print("    [!] No link icon found in toolbar")
+                except Exception as e:
+                    print(f"    [!] Error finding link icon: {e}")
+            
+            # Now find the "Link URL" input field that appeared
+            # The field label says "Link URL *" — the input is right below it
+            if link_embed_clicked:
+                print("    [*] Looking for Link URL input field...")
+                
+                url_field_found = False
+                for attempt in range(5):
                     try:
-                        if page.locator(sel).count() > 0:
-                            HumanBehavior.move_and_click(page, sel)
-                            HumanBehavior.random_delay(0.3, 0.8)
-                            page.keyboard.type(url, delay=random.randint(30, 80))
+                        # Find the "Link URL" label element and click below it
+                        label_pos = page.evaluate("""() => {
+                            const all = document.querySelectorAll('*');
+                            for (const el of all) {
+                                // Get only direct text nodes (not child element text)
+                                const ownText = Array.from(el.childNodes)
+                                    .filter(n => n.nodeType === 3)
+                                    .map(n => n.textContent)
+                                    .join('');
+                                if (ownText.includes('Link URL')) {
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect.width > 0 && rect.height > 0) {
+                                        // The input field should be below or right after the label
+                                        return {
+                                            x: rect.x + 50,
+                                            y: rect.bottom + 25,
+                                            labelX: rect.x,
+                                            labelY: rect.y,
+                                            labelBottom: rect.bottom
+                                        };
+                                    }
+                                }
+                            }
+                            return null;
+                        }""")
+                        
+                        if label_pos:
+                            input_x = int(label_pos['x'])
+                            input_y = int(label_pos['y'])
+                            print(f"    [*] Clicking URL input at ({input_x}, {input_y})...")
+                            page.mouse.click(input_x, input_y)
+                            time.sleep(1)
+                            
+                            # Type the URL
+                            page.keyboard.type(url, delay=30)
+                            time.sleep(2)
+                            url_field_found = True
+                            print("    [+] URL typed into Link URL field!")
+                            break
+                        else:
+                            print(f"    [*] Link URL label not found (attempt {attempt+1})")
+                            time.sleep(2)
+                    except Exception as e:
+                        print(f"    [*] Error finding URL field (attempt {attempt+1}): {e}")
+                        time.sleep(2)
+                
+                if not url_field_found:
+                    print("    [!] Could not find Link URL field — falling back to body paste")
+            
+            # Take a screenshot after Link Embed click
+            self.take_screenshot(page, "after_link_tab")
+            
+            # Wait for link preview to load if URL was entered via Link URL field
+            if url_field_found:
+                print("    [*] Waiting for link preview to load...")
+                time.sleep(8)
+
+            # Fill in URL — if already filled via Link URL field, skip this
+            if not url_field_found if link_embed_clicked else True:
+                print("    [*] Entering URL...")
+                url_selectors = [
+                    'input[name="url"]',
+                    'input[type="url"]',
+                    'textarea[placeholder*="URL"]',
+                    'input[placeholder*="URL"]',
+                    'input[placeholder*="url"]',
+                    'input[placeholder*="Url"]',
+                    'input[placeholder*="link"]',
+                    'input[placeholder*="Link"]',
+                    'input[placeholder*="Link URL"]',
+                    '#post-url',
+                    '[data-testid="post-url"]',
+                ]
+                url_filled = False
+                for sel in url_selectors:
+                    try:
+                        if page.locator(sel).count() > 0 and page.locator(sel).first.is_visible():
+                            HumanBehavior.type_human(page, sel, url)
                             url_filled = True
-                            print(f"    [+] URL entered into body via: {sel}")
+                            print(f"    [+] URL filled via selector: {sel}")
                             break
                     except:
                         continue
 
-            if not url_filled:
-                screenshot = self.take_screenshot(page, "url_and_body_not_found")
-                return False, None, screenshot
+                if not url_filled:
+                    # No URL field found — paste into body text area instead
+                    print("    [*] No URL field found — pasting URL into body text area...")
+                    body_selectors = [
+                        'div[contenteditable="true"][role="textbox"]',
+                        'textarea[placeholder*="Body"]',
+                        'div[role="textbox"]',
+                    ]
+                    for sel in body_selectors:
+                        try:
+                            if page.locator(sel).count() > 0:
+                                HumanBehavior.move_and_click(page, sel)
+                                HumanBehavior.random_delay(0.3, 0.8)
+                                page.keyboard.type(url, delay=random.randint(30, 80))
+                                url_filled = True
+                                print(f"    [+] URL entered into body via: {sel}")
+                                break
+                        except:
+                            continue
+
+                if not url_filled:
+                    screenshot = self.take_screenshot(page, "url_and_body_not_found")
+                    return False, None, screenshot
+            else:
+                print("    [+] URL already filled via Link URL field — skipping")
+                url_filled = True
 
             HumanBehavior.random_delay(1, 3)
 
