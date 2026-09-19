@@ -424,6 +424,15 @@ class RedditPoster:
             return records[0]
         return None
 
+    def _get_subreddit_niche(self, subreddit: str) -> Optional[str]:
+        """Look up the niche for a subreddit from the Subreddits table in Airtable."""
+        subreddit_clean = subreddit.replace("r/", "").replace("/r/", "").strip()
+        formula = f'{{Subreddit}} = "{subreddit_clean}"'
+        records = self._at_get("Subreddits", filter_formula=formula)
+        if records:
+            return records[0].get("fields", {}).get("Niche", "")
+        return None
+
     # === Screenshot Methods ===
 
     def take_screenshot(self, page: Page, context: str = "error") -> Optional[str]:
@@ -1195,6 +1204,23 @@ class RedditPoster:
             print(f"    Account: {account_name}")
             print(f"    Subreddit: r/{subreddit}")
             print(f"    Title: {title}")
+            print(f"    Niche: {niche}")
+
+            # Check niche/subreddit match
+            if niche and subreddit:
+                subreddit_niche = self._get_subreddit_niche(subreddit)
+                if subreddit_niche and subreddit_niche != "General" and niche != "General":
+                    if subreddit_niche != niche:
+                        print(f"    [!] Niche mismatch: link niche '{niche}' does not match subreddit niche '{subreddit_niche}' — skipping")
+                        # Update post status to Failed
+                        self._at_update_single(self.posts_table, link_record["id"], {
+                            "Status": "Failed",
+                            "Error": f"Niche mismatch: {niche} vs {subreddit_niche}",
+                        })
+                        fail_count += 1
+                        continue
+                    else:
+                        print(f"    [+] Niche match: {niche} == {subreddit_niche}")
 
             if dry_run:
                 print(f"    [DRY RUN] Would post to r/{subreddit}")
