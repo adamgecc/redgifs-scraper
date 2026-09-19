@@ -299,7 +299,7 @@ class RedditPoster:
         self,
         airtable_token: str,
         airtable_base: str,
-        links_table: str = "Links",
+        links_table: str = "Posts",
         accounts_table: str = "Accounts",
         screenshot_dir: str = "screenshots",
         headless: bool = True,
@@ -309,7 +309,7 @@ class RedditPoster:
     ):
         self.airtable_token = airtable_token
         self.airtable_base = airtable_base
-        self.links_table = links_table
+        self.posts_table = links_table  # Renamed to posts_table for clarity
         self.accounts_table = accounts_table
         self.screenshot_dir = screenshot_dir
         self.headless = headless
@@ -384,7 +384,7 @@ class RedditPoster:
                 file_data = f.read()
 
             # First upload the file to Airtable's file upload endpoint
-            upload_url = f"https://content.airtable.com/v0/{self.airtable_base}/{quote(self.links_table)}/{record_id}/{quote(field_name)}"
+            upload_url = f"https://content.airtable.com/v0/{self.airtable_base}/{quote(self.posts_table)}/{record_id}/{quote(field_name)}"
             files = {
                 field_name: (filename, file_data, "image/png"),
             }
@@ -402,18 +402,18 @@ class RedditPoster:
             return False
 
     def get_queued_links(self, account_name: str = None, max_results: int = None) -> List[Dict]:
-        """Get links with Status='Queued' from Airtable."""
+        """Get posts with Status='Queued' from Posts table."""
         if account_name:
-            formula = f'AND({{Status}} = "Queued", {{Assigned Account}} = "{account_name}")'
+            formula = f'AND({{Status}} = "Queued", {{Account}} = "{account_name}")'
         else:
             formula = '{Status} = "Queued"'
 
-        records = self._at_get(self.links_table, filter_formula=formula)
+        records = self._at_get(self.posts_table, filter_formula=formula)
 
         if max_results:
             records = records[:max_results]
 
-        print(f"  [*] Found {len(records)} queued links")
+        print(f"  [*] Found {len(records)} queued posts")
         return records
 
     def get_account_info(self, account_name: str) -> Optional[Dict]:
@@ -1142,11 +1142,11 @@ class RedditPoster:
 
         for i, link_record in enumerate(links, 1):
             fields = link_record.get("fields", {})
-            url = fields.get("URL", "")
+            url = fields.get("RedGifs Link", "")
             title = fields.get("Title", "")
             niche = fields.get("Niche", "")
             subreddit_raw = fields.get("Subreddit", "")
-            account_name = fields.get("Assigned Account", "")
+            account_name = fields.get("Account", "")
 
             # Clean subreddit name (remove r/ prefix if present)
             subreddit = subreddit_raw.replace("r/", "").replace("/r/", "").strip() if subreddit_raw else niche.lower()
@@ -1221,13 +1221,20 @@ class RedditPoster:
                         except:
                             pass
 
-                    # Login to Reddit
+                    # Login to Reddit — always try, even if session might be alive
+                    # The login function checks if already logged in first
                     login_success = self.login_reddit(page, reddit_username, reddit_password)
+
+                    if not login_success:
+                        # Retry login once more
+                        print(f"    [*] Retrying login...")
+                        time.sleep(3)
+                        login_success = self.login_reddit(page, reddit_username, reddit_password)
 
                     if not login_success:
                         print(f"    [!] Login failed — marking link as Failed")
                         screenshot = self.take_screenshot(page, f"login_fail_{reddit_username}")
-                        self._at_update_single(self.links_table, link_record["id"], {
+                        self._at_update_single(self.posts_table, link_record["id"], {
                             "Status": "Failed",
                             "Error Screenshot": [{"url": f"file://{screenshot}"}] if screenshot else None,
                         })
@@ -1252,7 +1259,7 @@ class RedditPoster:
                         if post_url:
                             update_fields["Reddit Post URL"] = post_url
 
-                        self._at_update_single(self.links_table, link_record["id"], update_fields)
+                        self._at_update_single(self.posts_table, link_record["id"], update_fields)
 
                         # Update Airtable Accounts table
                         posts_today = account_fields.get("Posts Today", 0) or 0
@@ -1274,11 +1281,11 @@ class RedditPoster:
                         # Upload screenshot to Airtable as attachment
                         if error_screenshot:
                             self._at_upload_attachment(
-                                self.links_table, link_record["id"],
+                                self.posts_table, link_record["id"],
                                 "Error Screenshot", error_screenshot
                             )
 
-                        self._at_update_single(self.links_table, link_record["id"], update_fields)
+                        self._at_update_single(self.posts_table, link_record["id"], update_fields)
 
                         # Check if account should be marked Banned
                         if error_screenshot and "captcha" in error_screenshot:
@@ -1314,7 +1321,7 @@ def main():
     parser = argparse.ArgumentParser(description="Reddit Auto-Poster via AdsPower + Playwright")
     parser.add_argument("--token", default=os.getenv("AIRTABLE_PAT"), help="Airtable PAT")
     parser.add_argument("--base-id", default=os.getenv("AIRTABLE_BASE_ID"), help="Airtable base ID")
-    parser.add_argument("--links-table", default="Links", help="Links table name")
+    parser.add_argument("--links-table", default="Posts", help="Posts table name")
     parser.add_argument("--accounts-table", default="Accounts", help="Accounts table name")
     parser.add_argument("--post", action="store_true", help="Run the auto-poster")
     parser.add_argument("--dry-run", action="store_true", help="Preview without posting")
