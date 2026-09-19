@@ -427,9 +427,12 @@ class RedditPoster:
     # === Screenshot Methods ===
 
     def take_screenshot(self, page: Page, context: str = "error") -> Optional[str]:
-        """Take a screenshot and save it locally."""
+        """Take a screenshot and save it to the redgifs_screenshots folder on the Desktop."""
+        import os as os2
+        screenshot_dir = os2.path.expanduser("~/Desktop/redgifs_screenshots")
+        os2.makedirs(screenshot_dir, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{self.screenshot_dir}/{context}_{timestamp}.png"
+        filename = f"{screenshot_dir}/{context}_{timestamp}.png"
         try:
             page.screenshot(path=filename, full_page=True)
             print(f"      [+] Screenshot saved: {filename}")
