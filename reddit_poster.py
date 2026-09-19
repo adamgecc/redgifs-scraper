@@ -948,28 +948,48 @@ class RedditPoster:
 
                 if not url_filled:
                     # No URL field found — paste into body text area instead
+                    # IMPORTANT: The body text area is DIFFERENT from the title field
+                    # On Reddit's new UI, both are contenteditable divs with role="textbox"
+                    # We need to skip the title (which was already filled) and find the BODY area
                     print("    [*] No URL field found — pasting URL into body text area...")
+                    # First, find how many contenteditable divs exist
+                    body_count = page.locator('div[contenteditable="true"][role="textbox"]').count()
+                    print(f"    [*] Found {body_count} contenteditable textboxes on page")
+                    
                     body_selectors = [
-                        'div[contenteditable="true"][role="textbox"]',
+                        'div[contenteditable="true"][role="textbox"] >> nth=1',  # Second one (first is title)
                         'textarea[placeholder*="Body"]',
-                        'div[role="textbox"]',
+                        'textarea[placeholder*="body"]',
+                        'div[role="textbox"]:not([placeholder*="Title"])',
                     ]
+                    
                     for sel in body_selectors:
                         try:
-                            if page.locator(sel).count() > 0:
-                                # Click the body area
-                                HumanBehavior.move_and_click(page, sel)
-                                HumanBehavior.random_delay(0.3, 0.8)
-                                # Clear any existing content first
-                                page.keyboard.press("Control+a")
-                                time.sleep(0.1)
-                                page.keyboard.press("Backspace")
-                                time.sleep(0.2)
-                                # Type ONLY the URL — nothing else
-                                page.keyboard.type(url, delay=random.randint(30, 80))
-                                url_filled = True
-                                print(f"    [+] URL entered into body via: {sel}")
-                                break
+                            if 'nth=1' in sel:
+                                # Use Playwright's nth() to get the second contenteditable div
+                                loc = page.locator('div[contenteditable="true"][role="textbox"]')
+                                if loc.count() > 1:
+                                    loc = loc.nth(1)
+                                    HumanBehavior.move_and_click(page, sel.split(" >> ")[0])
+                                    # Re-select the correct element
+                                    loc.click()
+                                else:
+                                    continue
+                            else:
+                                if page.locator(sel).count() > 0:
+                                    HumanBehavior.move_and_click(page, sel)
+                            
+                            HumanBehavior.random_delay(0.3, 0.8)
+                            # Clear any existing content first
+                            page.keyboard.press("Control+a")
+                            time.sleep(0.1)
+                            page.keyboard.press("Backspace")
+                            time.sleep(0.2)
+                            # Type ONLY the URL — nothing else
+                            page.keyboard.type(url, delay=random.randint(30, 80))
+                            url_filled = True
+                            print(f"    [+] URL entered into body via: {sel}")
+                            break
                         except:
                             continue
 
@@ -980,15 +1000,13 @@ class RedditPoster:
                 print("    [+] URL already filled via Link URL field — skipping")
                 url_filled = True
 
-            HumanBehavior.random_delay(1, 3)
-
-            # Fill in title
+            # Fill in title FIRST (before URL) to prevent mixing
             print("    [*] Entering title...")
             title_selectors = [
                 'textarea[placeholder*="Title"]',
-                'input[placeholder*="Title"]',
                 'textarea[name="title"]',
                 'input[name="title"]',
+                'input[placeholder*="Title"]',
                 '#post-title',
                 '[data-testid="post-title"]',
             ]
@@ -996,7 +1014,6 @@ class RedditPoster:
             for sel in title_selectors:
                 try:
                     if page.locator(sel).count() > 0:
-                        # Clear field first, then type title
                         page.locator(sel).first.click()
                         time.sleep(0.2)
                         page.keyboard.press("Control+a")
@@ -1013,6 +1030,12 @@ class RedditPoster:
             if not title_filled:
                 screenshot = self.take_screenshot(page, "title_field_not_found")
                 return False, None, screenshot
+
+            HumanBehavior.random_delay(1, 3)
+
+            # Now fill URL — either via Link URL field or body text area
+            # IMPORTANT: Use selectors that DON'T match the title field
+            print("    [*] Entering URL...")
 
             HumanBehavior.random_delay(1, 2)
 
