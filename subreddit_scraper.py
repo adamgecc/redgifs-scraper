@@ -28,8 +28,9 @@ class SubredditScraper:
                  subreddits_table: str = "Subreddits"):
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         })
 
         self.airtable_token = airtable_token
@@ -43,90 +44,186 @@ class SubredditScraper:
     def scrape_user_subreddits(self, username: str, limit: int = 100) -> Dict[str, Dict]:
         """
         Scrape a Reddit user's post history to find which subreddits they post to.
-
-        Uses the public JSON API: /user/{username}/submitted.json
-        No authentication needed.
+        Uses the public Reddit page (HTML) and falls back to .json API.
 
         Args:
             username: Reddit username (without u/ prefix)
-            limit: max posts to scan (Reddit API max is 100 per page)
+            limit: max posts to scan
 
         Returns:
-            dict: {subreddit_name: {post_count, nsfw, sample_title, sample_url}}
+            dict: {subreddit_name: {post_count, nsfw, sample_title, sample_url, is_link, subreddit_subscribers}}
         """
         print(f"\n[*] Scraping u/{username}'s post history...")
 
         subreddits = {}
-        after = None
-        pages_scraped = 0
-        max_pages = 10  # Safety limit
 
-        while pages_scraped < max_pages:
-            url = f"{self.REDDIT_API}/user/{username}/submitted.json"
-            params = {"limit": min(limit, 100), "sort": "new", "t": "all"}
-            if after:
-                params["after"] = after
+        # Try .json endpoint first (works with some users)
+        url = f"{self.REDDIT_API}/user/{username}/submitted.json"
+        params = {"limit": min(limit, 100), "sort": "new", "t": "all"}
 
-            try:
-                resp = self.session.get(url, params=params, timeout=30)
+        try:
+            resp = self.session.get(url, params=params, timeout=30)
 
-                if resp.status_code == 404:
-                    print(f"  [!] User u/{username} not found")
-                    return {}
-                elif resp.status_code == 429:
-                    print(f"  [!] Rate limited — waiting 10s...")
-                    time.sleep(10)
-                    continue
-                elif resp.status_code != 200:
-                    print(f"  [!] HTTP {resp.status_code}")
-                    return {}
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    posts = data.get("data", {}).get("children", [])
 
-                data = resp.json()
-                posts = data.get("data", {}).get("children", [])
+                    if not posts:
+                        print(f"  [!] No posts found for u/{username}")
+                        return {}
 
-                if not posts:
-                    break
+                    for post in posts:
+                        p_data = post.get("data", {})
+                        subreddit = p_data.get("subreddit", "")
+                        if not subreddit:
+                            continue
 
-                for post in posts:
-                    p_data = post.get("data", {})
-                    subreddit = p_data.get("subreddit", "")
-                    if not subreddit:
-                        continue
+                        if subreddit not in subreddits:
+                            subreddits[subreddit] = {
+                                "post_count": 0,
+                                "nsfw": p_data.get("over_18", False),
+                                "sample_title": p_data.get("title", "")[:100],
+                                "sample_url": p_data.get("url", ""),
+                                "is_link": not p_data.get("is_self", False),
+                                "subreddit_subscribers": 0,
+                            }
 
-                    if subreddit not in subreddits:
-                        subreddits[subreddit] = {
-                            "post_count": 0,
-                            "nsfw": p_data.get("over_18", False),
-                            "sample_title": p_data.get("title", "")[:100],
-                            "sample_url": p_data.get("url", ""),
-                            "is_link": not p_data.get("is_self", False),
-                            "subreddit_subscribers": 0,
-                        }
+                        subreddits[subreddit]["post_count"] += 1
 
-                    subreddits[subreddit]["post_count"] += 1
+                    # Pagination
+                    after = data.get("data", {}).get("after")
+                    pages = 1
+                    while after and pages < 10:
+                        time.sleep(2)
+                        params["after"] = after
+                        resp = self.session.get(url, params=params, timeout=30)
+                        if resp.status_code != 200:
+                            break
+                        data = resp.json()
+                        posts = data.get("data", {}).get("children", [])
+                        if not posts:
+                            break
+                        for post in posts:
+                            p_data = post.get("data", {})
+                            subreddit = p_data.get("subreddit", "")
+                            if not subreddit:
+                                continue
+                            if subreddit not in subreddits:
+                                subreddits[subreddit] = {
+                                    "post_count": 0,
+                                    "nsfw": p_data.get("over_18", False),
+                                    "sample_title": p_data.get("title", "")[:100],
+                                    "sample_url": p_data.get("url", ""),
+                                    "is_link": not p_data.get("is_self", False),
+                                    "subreddit_subscribers": 0,
+                                }
+                            subreddits[subreddit]["post_count"] += 1
+                        after = data.get("data", {}).get("after")
+                        pages += 1
 
-                after = data.get("data", {}).get("after")
-                pages_scraped += 1
+                except Exception:
+                    print(f"  [!] JSON parse failed — trying HTML scrape...")
+                    subreddits = self._scrape_html(username, limit)
 
-                if not after:
-                    break
+            elif resp.status_code == 403:
+                print(f"  [*] JSON API blocked (403) — trying HTML scrape...")
+                subreddits = self._scrape_html(username, limit)
 
-                time.sleep(2)  # Rate limit friendliness
-
-            except requests.exceptions.RequestException as e:
-                print(f"  [!] Request failed: {e}")
+            elif resp.status_code == 404:
+                print(f"  [!] User u/{username} not found")
                 return {}
 
-        # Get subreddit details (subscriber count, NSFW status) for each
+            else:
+                print(f"  [!] HTTP {resp.status_code}")
+                subreddits = self._scrape_html(username, limit)
+
+        except requests.exceptions.RequestException as e:
+            print(f"  [!] Request failed: {e}")
+            return {}
+
+        if not subreddits:
+            print(f"  [!] No subreddits found for u/{username}")
+            return {}
+
         print(f"  [+] Found {len(subreddits)} subreddits from {sum(s['post_count'] for s in subreddits.values())} posts")
 
-        # Fetch subreddit info for top subreddits
+        # Get subreddit details
         for sub_name in list(subreddits.keys()):
             sub_info = self.get_subreddit_info(sub_name)
             if sub_info:
                 subreddits[sub_name]["nsfw"] = sub_info.get("over18", subreddits[sub_name]["nsfw"])
                 subreddits[sub_name]["subreddit_subscribers"] = sub_info.get("subscribers", 0)
             time.sleep(1)
+
+        return subreddits
+
+    def _scrape_html(self, username: str, limit: int = 100) -> Dict[str, Dict]:
+        """
+        Fallback: scrape subreddit names from the HTML profile page.
+        Reddit embeds post data in the HTML as JSON in a <script> tag.
+        """
+        url = f"{self.REDDIT_API}/user/{username}/submitted/"
+        subreddits = {}
+
+        try:
+            resp = self.session.get(url, timeout=30, params={"sort": "new", "t": "all", "limit": min(limit, 100)})
+
+            if resp.status_code == 404:
+                print(f"  [!] User u/{username} not found")
+                return {}
+
+            if resp.status_code != 200:
+                print(f"  [!] HTML scrape failed: HTTP {resp.status_code}")
+                return {}
+
+            # Reddit embeds data in <script> tags as JSON
+            text = resp.text
+
+            # Look for subreddit names in the HTML — they appear as data attributes or in JSON
+            import re
+            import json as jsonmod
+
+            # Try to find the r/<subreddit> pattern in the HTML
+            sub_patterns = re.findall(r'/r/([a-zA-Z0-9_]{3,21})', text)
+            for sub in set(sub_patterns):
+                if sub.lower() not in ('all', 'popular', 'friends', 'mod', 'announcements'):
+                    if sub not in subreddits:
+                        subreddits[sub] = {
+                            "post_count": 1,
+                            "nsfw": True,  # Assume NSFW since these are porn accounts
+                            "sample_title": "",
+                            "sample_url": "",
+                            "is_link": True,
+                            "subreddit_subscribers": 0,
+                        }
+                    else:
+                        subreddits[sub]["post_count"] += 1
+
+            # Also try to find the JSON blob in the page
+            json_match = re.search(r'<script[^>]*>window\.___r\s*=\s*({.*?})</script>', text, re.DOTALL)
+            if json_match:
+                try:
+                    data = jsonmod.loads(json_match.group(1))
+                    posts = data.get("posts", {}).get("models", [])
+                    for post in posts:
+                        sub = post.get("subredditName", post.get("subreddit", ""))
+                        if sub and sub not in subreddits:
+                            subreddits[sub] = {
+                                "post_count": 1,
+                                "nsfw": True,
+                                "sample_title": post.get("title", "")[:100],
+                                "sample_url": post.get("url", ""),
+                                "is_link": not post.get("isSelf", False),
+                                "subreddit_subscribers": 0,
+                            }
+                        elif sub:
+                            subreddits[sub]["post_count"] += 1
+                except:
+                    pass
+
+        except requests.exceptions.RequestException as e:
+            print(f"  [!] HTML scrape error: {e}")
 
         return subreddits
 
