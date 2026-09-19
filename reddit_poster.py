@@ -433,6 +433,17 @@ class RedditPoster:
             return records[0].get("fields", {}).get("Niche", "")
         return None
 
+    def _get_subreddit_banned_words(self, subreddit: str) -> list:
+        """Look up banned words for a subreddit from the Subreddits table."""
+        subreddit_clean = subreddit.replace("r/", "").replace("/r/", "").strip()
+        formula = f'{{Subreddit}} = "{subreddit_clean}"'
+        records = self._at_get("Subreddits", filter_formula=formula)
+        if records:
+            banned = records[0].get("fields", {}).get("Banned Words", "")
+            if banned:
+                return [w.strip() for w in banned.split(",") if w.strip()]
+        return []
+
     # === Screenshot Methods ===
 
     def take_screenshot(self, page: Page, context: str = "error") -> Optional[str]:
@@ -1221,6 +1232,21 @@ class RedditPoster:
                         continue
                     else:
                         print(f"    [+] Niche match: {niche} == {subreddit_niche}")
+
+            # Check banned words in title
+            if subreddit:
+                banned_words = self._get_subreddit_banned_words(subreddit)
+                if banned_words:
+                    title_lower = title.lower()
+                    found_banned = [w for w in banned_words if w.lower() in title_lower]
+                    if found_banned:
+                        print(f"    [!] Title contains banned words: {found_banned} — skipping (r/{subreddit} rules)")
+                        self._at_update_single(self.posts_table, link_record["id"], {
+                            "Status": "Failed",
+                            "Error": f"Banned words in title: {', '.join(found_banned)} (r/{subreddit})",
+                        })
+                        fail_count += 1
+                        continue
 
             if dry_run:
                 print(f"    [DRY RUN] Would post to r/{subreddit}")
