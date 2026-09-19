@@ -1390,6 +1390,11 @@ class RedditPoster:
 
             except Exception as e:
                 print(f"    [!] Browser error: {e}")
+                # If proxy error, wait and retry once
+                if "SOCKS" in str(e) or "ERR_PROXY" in str(e) or "ERR_SOCKS" in str(e):
+                    print(f"    [*] Proxy connection failed — waiting 60s for IP rotation...")
+                    self.adspower.rotate_ip()
+                    time.sleep(60)
                 fail_count += 1
 
             finally:
@@ -1400,7 +1405,7 @@ class RedditPoster:
                 # Rotate proxy IP for next account
                 self.adspower.rotate_ip()
 
-                time.sleep(random.uniform(3, 8))  # Cooldown between accounts
+                time.sleep(random.uniform(30, 60))  # Cooldown between accounts (longer for proxy rotation)
 
         # Summary
         print(f"\n[*] Automation Complete:")
