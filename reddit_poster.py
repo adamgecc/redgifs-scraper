@@ -954,8 +954,15 @@ class RedditPoster:
                     for sel in body_selectors:
                         try:
                             if page.locator(sel).count() > 0:
+                                # Click the body area
                                 HumanBehavior.move_and_click(page, sel)
                                 HumanBehavior.random_delay(0.3, 0.8)
+                                # Clear any existing content first
+                                page.keyboard.press("Control+a")
+                                time.sleep(0.1)
+                                page.keyboard.press("Backspace")
+                                time.sleep(0.2)
+                                # Type ONLY the URL — nothing else
                                 page.keyboard.type(url, delay=random.randint(30, 80))
                                 url_filled = True
                                 print(f"    [+] URL entered into body via: {sel}")
@@ -986,6 +993,13 @@ class RedditPoster:
             for sel in title_selectors:
                 try:
                     if page.locator(sel).count() > 0:
+                        # Clear field first, then type title
+                        page.locator(sel).first.click()
+                        time.sleep(0.2)
+                        page.keyboard.press("Control+a")
+                        time.sleep(0.1)
+                        page.keyboard.press("Backspace")
+                        time.sleep(0.2)
                         HumanBehavior.type_human(page, sel, title)
                         title_filled = True
                         print(f"    [+] Title filled via selector: {sel}")
