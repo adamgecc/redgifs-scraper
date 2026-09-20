@@ -614,7 +614,7 @@ class RedditPoster:
 
     # === Reddit Posting ===
 
-    def post_link(self, page: Page, subreddit: str, url: str, title: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    def post_link(self, page: Page, subreddit: str, url: str, title: str, reddit_username: str = "") -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Post a link to a subreddit.
         Reddit's new submit page has Title + Body (rich text editor).
@@ -1124,35 +1124,54 @@ class RedditPoster:
             # Try to get the post URL
             reddit_post_url = None
 
-            # Method 1: Check if URL changed to the new post
+            # Method 1: Check if URL changed to the new post (most reliable)
+            # After posting, Reddit redirects to the subreddit page with ?created=... params
             current_url = page.url
-            if "/comments/" in current_url and "FarmMergeValley" not in current_url and "games_drawer" not in current_url:
-                reddit_post_url = current_url
+            if "created=" in current_url or "createdPostType" in current_url:
+                # Extract the post ID from the URL params
+                import re as re_mod
+                created_match = re_mod.search(r'created=(t3_\w+)', current_url)
+                if created_match:
+                    post_id = created_match.group(1)
+                    # Construct the post URL — we need the subreddit and title slug
+                    reddit_post_url = f"https://www.reddit.com/r/{subreddit}/comments/{post_id.replace('t3_', '')}/"
+                    print(f"    [+] Post URL (from created param): {reddit_post_url}")
+
+            # Method 2: If no created param, check if URL redirected to the post directly
+            if not reddit_post_url and "/comments/" in current_url:
+                # Make sure it's not a random post — check it's recent
+                reddit_post_url = current_url.split("?")[0]  # Remove query params
                 print(f"    [+] Post URL (from redirect): {reddit_post_url}")
 
-            # Method 2: Look for post link on page — but EXCLUDE promo/game links
+            # Method 3: Check the user's profile for their newest post
             if not reddit_post_url:
                 try:
+                    print(f"    [*] Checking user profile for latest post...")
+                    page.goto(f"https://www.reddit.com/user/{reddit_username}/submitted/", wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(5)
+                    
+                    # Find the first post link on the profile page
                     post_links = page.locator('a[href*="/comments/"]')
-                    link_count = post_links.count()
-                    for i in range(link_count):
-                        href = post_links.nth(i).get_attribute("href") or ""
-                        # Skip Reddit game promos and sponsored content
-                        if "FarmMergeValley" in href or "games_drawer" in href or "entry_point" in href:
-                            continue
-                        if "sponsored" in href.lower():
-                            continue
-                        # This should be our actual post
-                        if href.startswith("/"):
-                            reddit_post_url = f"https://www.reddit.com{href}"
-                        elif not href.startswith("http"):
-                            reddit_post_url = f"https://www.reddit.com/{href}"
-                        else:
-                            reddit_post_url = href
-                        print(f"    [+] Post URL (from link): {reddit_post_url}")
-                        break
-                except:
-                    pass
+                    if post_links.count() > 0:
+                        for i in range(post_links.count()):
+                            href = post_links.nth(i).get_attribute("href") or ""
+                            # Skip game promos and sponsored content
+                            if "FarmMergeValley" in href or "games_drawer" in href or "entry_point" in href:
+                                continue
+                            if "sponsored" in href.lower():
+                                continue
+                            # This should be our newest post
+                            if href.startswith("/"):
+                                reddit_post_url = f"https://www.reddit.com{href}"
+                            elif not href.startswith("http"):
+                                reddit_post_url = f"https://www.reddit.com/{href}"
+                            else:
+                                reddit_post_url = href
+                            reddit_post_url = reddit_post_url.split("?")[0]  # Remove query params
+                            print(f"    [+] Post URL (from profile): {reddit_post_url}")
+                            break
+                except Exception as e:
+                    print(f"    [*] Profile check error: {e}")
 
             if not reddit_post_url:
                 # Even if we can't find the URL, the post might have succeeded
@@ -1336,7 +1355,7 @@ class RedditPoster:
 
                     # Post the link
                     success, post_url, error_screenshot = self.post_link(
-                        page, subreddit, url, title
+                        page, subreddit, url, title, reddit_username
                     )
 
                     if success:
