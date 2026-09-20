@@ -1144,46 +1144,49 @@ class RedditPoster:
                 print(f"    [+] Post URL (from redirect): {reddit_post_url}")
 
             # Method 3: Check the user's profile for their newest post
-            if not reddit_post_url:
+            if not reddit_post_url and reddit_username:
                 try:
                     print(f"    [*] Checking user profile for latest post...")
                     page.goto(f"https://www.reddit.com/user/{reddit_username}/submitted/", wait_until="domcontentloaded", timeout=30000)
                     time.sleep(8)
                     
-                    # Find the first post link on the profile page
-                    # The profile shows posts sorted by "new" — first one is our newest post
-                    # Look for links that contain /comments/ AND the subreddit name
-                    post_links = page.locator(f'a[href*="/r/{subreddit}/comments/"]')
-                    if post_links.count() > 0:
-                        href = post_links.first.get_attribute("href") or ""
-                        if href:
-                            if href.startswith("/"):
-                                reddit_post_url = f"https://www.reddit.com{href}"
-                            elif not href.startswith("http"):
-                                reddit_post_url = f"https://www.reddit.com/{href}"
-                            else:
-                                reddit_post_url = href
-                            reddit_post_url = reddit_post_url.split("?")[0]  # Remove query params
-                            print(f"    [+] Post URL (from profile - subreddit match): {reddit_post_url}")
-                    else:
-                        # Fallback: any /comments/ link that's not a user profile
-                        all_links = page.locator('a[href*="/comments/"]')
-                        for i in range(all_links.count()):
-                            href = all_links.nth(i).get_attribute("href") or ""
-                            # Skip user profile links and game promos
-                            if "/user/" in href:
-                                continue
-                            if "FarmMergeValley" in href or "games_drawer" in href or "entry_point" in href:
-                                continue
-                            if href.startswith("/"):
-                                reddit_post_url = f"https://www.reddit.com{href}"
-                            elif not href.startswith("http"):
-                                reddit_post_url = f"https://www.reddit.com/{href}"
-                            else:
-                                reddit_post_url = href
-                            reddit_post_url = reddit_post_url.split("?")[0]
-                            print(f"    [+] Post URL (from profile - first match): {reddit_post_url}")
-                            break
+                    # Look for links matching BOTH the subreddit AND our title
+                    # Title words we can match on (first 3 words, lowercased)
+                    title_words = [w.lower() for w in title.split()[:3] if len(w) > 2]
+                    
+                    all_links = page.locator('a[href*="/comments/"]')
+                    link_count = all_links.count()
+                    print(f"    [*] Found {link_count} comment links on profile")
+                    
+                    for i in range(link_count):
+                        href = all_links.nth(i).get_attribute("href") or ""
+                        # Skip user profile links and game promos
+                        if "/user/" in href:
+                            continue
+                        if "FarmMergeValley" in href or "games_drawer" in href or "entry_point" in href:
+                            continue
+                        if "sponsored" in href.lower():
+                            continue
+                        # Check if this link is for our subreddit
+                        if f"/r/{subreddit}/" not in href and f"/r/{subreddit.lower()}/" not in href:
+                            continue
+                        # Check if title matches (at least one word from our title in the URL slug)
+                        href_lower = href.lower()
+                        if title_words and not any(w in href_lower for w in title_words):
+                            continue
+                        # Found our post!
+                        if href.startswith("/"):
+                            reddit_post_url = f"https://www.reddit.com{href}"
+                        elif not href.startswith("http"):
+                            reddit_post_url = f"https://www.reddit.com/{href}"
+                        else:
+                            reddit_post_url = href
+                        reddit_post_url = reddit_post_url.split("?")[0]
+                        print(f"    [+] Post URL (from profile - subreddit + title match): {reddit_post_url}")
+                        break
+                    
+                    if not reddit_post_url:
+                        print(f"    [!] Could not find matching post on profile")
                 except Exception as e:
                     print(f"    [*] Profile check error: {e}")
 
